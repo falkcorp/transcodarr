@@ -37,6 +37,7 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
               with:
+                submodules: recursive
                   fetch-depth: 0
 
             - name: Check file changes
@@ -64,6 +65,8 @@ jobs:
         steps:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                submodules: recursive
 
             - name: Set up Rust
               uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
@@ -110,6 +113,8 @@ jobs:
         steps:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                submodules: recursive
 
             - name: Lint markdown
               uses: DavidAnson/markdownlint-cli2-action@eb5ca3ab411449c66620fe7f1b3c9e10547144b0 # v18.0.0
