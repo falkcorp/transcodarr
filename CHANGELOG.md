@@ -6,6 +6,10 @@
 
 All notable changes to this project will be documented in this file.
 
+<!-- scriv-insert-here -->
+
+<!-- scriv-end-here: releases below predate the changelog.d fragment system. -->
+
 ## 0.1.0 - Initial scaffolding
 
 - Bootstrap Rust CLI project (Cargo.toml, src/main.rs)
