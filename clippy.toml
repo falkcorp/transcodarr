@@ -1,15 +1,19 @@
 # file: clippy.toml
-# version: 1.0.0
+# version: 1.1.0
 # guid: 6f7a8b9c-0d1e-2345-f678-9abcdef01234
+# last-edited: 2026-07-31
 
 # Clippy configuration for Rust linting
 # Following Rust best practices and performance guidelines
+#
+# Every key below is validated against clippy 0.1.97. Clippy rejects its whole
+# config file on a single unknown key, so a stale name here does not degrade
+# gracefully -- it disables linting entirely.
 
 # Cognitive complexity threshold
+# (cyclomatic-complexity-threshold is a deprecated alias for this key; setting
+# both is a duplicate-field error, not an override.)
 cognitive-complexity-threshold = 25
-
-# Cyclomatic complexity threshold
-cyclomatic-complexity-threshold = 15
 
 # Documentation requirements
 missing-docs-in-crate-items = true
@@ -33,17 +37,17 @@ arithmetic-side-effects-allowed = ["Size", "Offset"]
 # Enum variant size threshold
 enum-variant-size-threshold = 200
 
-# Large error types threshold
-large-error-types-threshold = 128
+# Error type size threshold (was: large-error-types-threshold)
+large-error-threshold = 128
 
-# Large futures threshold
-large-futures-threshold = 16384
+# Future size threshold (was: large-futures-threshold)
+future-size-threshold = 16384
 
-# Large stack arrays threshold
-large-stack-arrays-threshold = 512000
+# Stack array size threshold (was: large-stack-arrays-threshold)
+too-large-for-stack = 512000
 
-# Large types passed by value threshold
-large-types-passed-by-value-threshold = 256
+# By-value parameter size limit (was: large-types-passed-by-value-threshold)
+pass-by-value-size-limit = 256
 
 # Literal representation threshold
 literal-representation-threshold = 10
@@ -51,11 +55,8 @@ literal-representation-threshold = 10
 # Maximum trait bounds
 max-trait-bounds = 3
 
-# Maximum function lines
+# Maximum bool parameters before a struct is warranted
 max-fn-params-bools = 3
-
-# String literal threshold
-string-literal-chars-threshold = 120
 
 # Trivial copy size limit
 trivial-copy-size-limit = 8
