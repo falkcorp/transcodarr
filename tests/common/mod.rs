@@ -1,9 +1,15 @@
 // file: tests/common/mod.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
 // last-edited: 2026-07-31
 
 //! Common test utilities and helpers for integration tests
+
+// This module is compiled into each test binary separately, so any helper not
+// used by *that particular* binary reads as dead code. The helpers are part of
+// the shared toolkit, not leftovers, so the lint is suppressed for the module
+// rather than by deleting them.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
