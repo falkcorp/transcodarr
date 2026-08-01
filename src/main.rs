@@ -1,8 +1,10 @@
 // file: src/main.rs
-// version: 0.7.0
+// version: 0.8.0
 // guid: 0f9e8d7c-6b5a-4c3d-2e1f-0a9b8c7d6e5f
+// last-edited: 2026-07-31
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -94,16 +96,17 @@ fn main() -> Result<()> {
             // Determine safe output path
             let resolved_output = resolve_output_path(&input, output.as_deref(), Some("mkv"))?;
             let (vcodec2, acodec2, extra2) =
-                apply_preset(preset.as_deref(), &vcodec, &acodec, &extra);
+                apply_preset(preset.as_deref(), &vcodec, &acodec, &extra)?;
             if dry_run {
-                println!(
-                    "[DRY RUN] Would transcode '{}' -> '{}' with vcodec={} acodec={} extra={:?}",
-                    input,
-                    resolved_output.display(),
-                    vcodec2,
-                    acodec2,
-                    extra2
+                let args = build_ffmpeg_args(
+                    &input,
+                    &resolved_output.to_string_lossy(),
+                    &vcodec2,
+                    &acodec2,
+                    &extra2,
                 );
+                println!("[DRY RUN] {} -> {}", input, resolved_output.display());
+                println!("  {}", format_ffmpeg_command(&args));
                 Ok(())
             } else {
                 transcode(
@@ -233,26 +236,39 @@ fn info(input: &str, json: bool) -> Result<()> {
         cmd.args(["-hide_banner", "-i", input]);
     }
 
-    let status = cmd
+    let out = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .output()
         .with_context(|| "failed to spawn ffprobe")?;
 
-    if !status.success() {
-        bail!("ffprobe exited with status: {:?}", status.code());
+    if !out.status.success() {
+        std::io::stderr().write_all(&out.stderr)?;
+        bail!("ffprobe exited with status: {:?}", out.status.code());
     }
+
+    // ffprobe writes the JSON report to stdout but the human-readable `-i`
+    // report to stderr. Both are the answer the user asked for, so both go to
+    // stdout -- otherwise `info` prints nothing pipeable and cannot be used in
+    // a shell pipeline at all.
+    let mut stdout = std::io::stdout();
+    stdout.write_all(&out.stdout)?;
+    if !json {
+        stdout.write_all(&out.stderr)?;
+    }
+    stdout.flush()?;
     Ok(())
 }
 
-fn transcode(
+// Build the exact ffmpeg argument list used for a transcode.
+// Factored out of `transcode` so `--dry-run` can print the real command instead
+// of a prose summary: a dry run you cannot copy-paste is not a dry run.
+fn build_ffmpeg_args(
     input: &str,
     output: &str,
     vcodec: &str,
     acodec: &str,
     extra: &[String],
-) -> Result<()> {
+) -> Vec<String> {
     // Build a conservative default arg list that tries to preserve metadata
     // -map_metadata 0 copies global metadata
     // -movflags use_metadata_tags preserves tags in MP4 containers
@@ -279,6 +295,34 @@ fn transcode(
 
     // Output path last
     args.push(output.to_string());
+
+    args
+}
+
+// Render an argv as a copy-pasteable shell command, quoting only what needs it.
+fn format_ffmpeg_command(args: &[String]) -> String {
+    let mut out = String::from("ffmpeg");
+    for arg in args {
+        out.push(' ');
+        if arg.is_empty() || arg.contains(|c: char| c.is_whitespace() || "'\"\\$`".contains(c)) {
+            out.push('\'');
+            out.push_str(&arg.replace('\'', r"'\''"));
+            out.push('\'');
+        } else {
+            out.push_str(arg);
+        }
+    }
+    out
+}
+
+fn transcode(
+    input: &str,
+    output: &str,
+    vcodec: &str,
+    acodec: &str,
+    extra: &[String],
+) -> Result<()> {
+    let args = build_ffmpeg_args(input, output, vcodec, acodec, extra);
 
     let status = Command::new("ffmpeg")
         .args(&args)
@@ -327,7 +371,7 @@ fn batch_transcode(
     }
 
     // Apply preset once to get effective settings
-    let (eff_vcodec, eff_acodec, eff_extra) = apply_preset(preset, vcodec, acodec, extra);
+    let (eff_vcodec, eff_acodec, eff_extra) = apply_preset(preset, vcodec, acodec, extra)?;
 
     if same_dir {
         println!(
@@ -362,12 +406,6 @@ fn batch_transcode(
             out
         };
 
-        // Ensure output directory exists
-        if let Some(parent) = output_file.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create output dir: {:?}", parent))?;
-        }
-
         println!(
             "\n[{}/{}] {} -> {}",
             idx + 1,
@@ -376,12 +414,24 @@ fn batch_transcode(
             output_file.display()
         );
 
+        // A dry run must not touch the filesystem, so the output directory is
+        // created only on the real path -- below this guard, never above it.
         if dry_run {
-            println!(
-                "  [DRY RUN] Would transcode with vcodec={} acodec={} extra={:?}",
-                eff_vcodec, eff_acodec, eff_extra
+            let args = build_ffmpeg_args(
+                &input_file.to_string_lossy(),
+                &output_file.to_string_lossy(),
+                &eff_vcodec,
+                &eff_acodec,
+                &eff_extra,
             );
+            println!("  [DRY RUN] {}", format_ffmpeg_command(&args));
             continue;
+        }
+
+        // Ensure output directory exists
+        if let Some(parent) = output_file.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create output dir: {:?}", parent))?;
         }
 
         // Perform the transcode
@@ -434,7 +484,7 @@ fn apply_preset(
     vcodec: &str,
     acodec: &str,
     extra: &[String],
-) -> (String, String, Vec<String>) {
+) -> Result<(String, String, Vec<String>)> {
     let mut out_v = vcodec.to_string();
     let mut out_a = acodec.to_string();
     let mut out_extra: Vec<String> = Vec::new();
@@ -495,8 +545,14 @@ fn apply_preset(
                     "320k".to_string(),
                 ]);
             }
-            _ => {
-                // Unknown preset: ignore silently; could print a warning later
+            other => {
+                // Silently ignoring an unknown preset is how you discover, an hour
+                // and 200 files later, that nothing you asked for was applied.
+                bail!(
+                    "unknown preset '{}'; valid presets are: original-h265 (aliases: original), \
+                     tv-h265-fast (aliases: tv-fast), movie-quality (aliases: movie)",
+                    other
+                );
             }
         }
     }
@@ -504,5 +560,5 @@ fn apply_preset(
     // Append user extras last to allow override
     out_extra.extend(extra.iter().cloned());
 
-    (out_v, out_a, out_extra)
+    Ok((out_v, out_a, out_extra))
 }
