@@ -1,5 +1,5 @@
 <!-- file: docs/design/synthesis-decisions.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.0.1 -->
 <!-- guid: e59fdfca-bf76-41d4-8b35-d5fa2a9d42e8 -->
 <!-- last-edited: 2026-07-31 -->
 
@@ -351,6 +351,8 @@ The system is built strictly bottom-up: pure core (no I/O) first, then store, th
 - `transcoderr_large_shed_active gauge - adaptive shedding reduced large-file concurrency`
 - `transcoderr_global_class_limit{class} gauge - cluster-wide cap currently enforced per class`
 - `transcoderr_progress_messages_dropped_total{agent} counter - lossy telemetry shed under congestion`
+- `transcoderr_api_unauthenticated{bind} gauge - 1 when a non-loopback bind has api_auth disabled`
+- `transcoderr_auth_failures_total{surface,reason} counter - rejected agent registrations, streams and API calls`
 
 ### Job states
 
