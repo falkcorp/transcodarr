@@ -1,5 +1,5 @@
 <!-- file: docs/design/distributed-architecture.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.0.1 -->
 <!-- guid: f15e2f8e-1e3b-4ac5-a124-9ce13a18ab26 -->
 <!-- last-edited: 2026-07-31 -->
 
@@ -307,7 +307,7 @@ pub enum AdminCommand { Diagnose, Explain, Queue, Trash, Config, Fsck, RollingUp
 
 This is a hard constraint, not a courtesy: `transcoderr local` is the escape hatch used when the orchestrator itself is broken.
 
-**Argument compatibility.** The existing top-level verbs are preserved as an alias layer. `transcoderr transcode ...`, `batch ...` and `info ...` remain valid and are rewritten to `local <verb>` before clap parsing, via a `#[command(alias)]` on each `LocalCommand` variant plus a hidden pre-parse shim in `main`. Every flag keeps its current name, default and semantics, including `--extensions "mp4,mkv,avi,mov,m4v,ts"` and the `_transcoded.<ext>` default output.
+**Argument compatibility.** The existing top-level verbs are preserved as an alias layer. `transcoderr transcode ...`, `batch ...` and `info ...` remain valid and are rewritten to `local <verb>` before clap parsing, via a `#[command(alias)]` on each `LocalCommand` variant plus a hidden pre-parse shim in `main`. Every flag keeps its current name, default and semantics, including `--input-exts "mp4,mkv,avi,mov,m4v,ts"` and the `_transcoded.<ext>` default output.
 
 **Where today's code lands.**
 
