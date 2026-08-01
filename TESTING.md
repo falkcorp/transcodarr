@@ -1,10 +1,11 @@
 <!-- file: TESTING.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 4d5e6f78-90ab-cdef-0123-456789abcdef -->
+<!-- last-edited: 2026-07-31 -->
 
-# Testing Guide for transcoderr
+# Testing Guide for transcodarr
 
-This document describes the comprehensive test and benchmark suite for transcoderr.
+This document describes the comprehensive test and benchmark suite for transcodarr.
 
 ## Overview
 
@@ -227,7 +228,7 @@ fn test_my_new_feature() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
     // Act
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "my-command",
         test_file.to_str().unwrap()
     ]).expect("Failed to run command");
