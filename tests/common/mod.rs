@@ -1,6 +1,7 @@
 // file: tests/common/mod.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
+// last-edited: 2026-07-31
 
 //! Common test utilities and helpers for integration tests
 
@@ -17,7 +18,7 @@ pub fn testdata_dir() -> PathBuf {
     project_root().join("testdata")
 }
 
-/// Get the path to the transcoderr binary
+/// Get the path to the transcodarr binary
 pub fn binary_path() -> PathBuf {
     let mut path = project_root();
     path.push("target");
@@ -27,15 +28,15 @@ pub fn binary_path() -> PathBuf {
         "release"
     });
     path.push(if cfg!(windows) {
-        "transcoderr.exe"
+        "transcodarr.exe"
     } else {
-        "transcoderr"
+        "transcodarr"
     });
     path
 }
 
-/// Run the transcoderr binary with given arguments
-pub fn run_transcoderr(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
+/// Run the transcodarr binary with given arguments
+pub fn run_transcodarr(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
     Command::new(binary_path()).args(args).output()
 }
 

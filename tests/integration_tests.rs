@@ -1,8 +1,9 @@
 // file: tests/integration_tests.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: 2b3c4d5e-6f78-90ab-cdef-0123456789ab
+// last-edited: 2026-07-31
 
-//! Integration tests for transcoderr CLI
+//! Integration tests for transcodarr CLI
 //! These tests execute the actual binary and validate behavior
 
 mod common;
@@ -12,7 +13,7 @@ use tempfile::TempDir;
 
 #[test]
 fn test_help_command() {
-    let output = common::run_transcoderr(&["--help"]).expect("Failed to run transcoderr --help");
+    let output = common::run_transcodarr(&["--help"]).expect("Failed to run transcodarr --help");
 
     assert!(output.status.success(), "Help command should succeed");
 
@@ -36,7 +37,7 @@ fn test_batch_same_directory_dry_run() {
     let testdata = common::testdata_dir();
 
     // Batch with same input and output directory
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         testdata.to_str().unwrap(),
         testdata.to_str().unwrap(),
@@ -76,7 +77,7 @@ fn test_filename_with_multiple_dots_preserves_stem() {
     let mut f = std::fs::File::create(&file_path).expect("create file");
     f.write_all(b"\n").ok();
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         temp.path().to_str().unwrap(),
         temp.path().to_str().unwrap(),
@@ -94,13 +95,13 @@ fn test_filename_with_multiple_dots_preserves_stem() {
 #[test]
 fn test_version_command() {
     let output =
-        common::run_transcoderr(&["--version"]).expect("Failed to run transcoderr --version");
+        common::run_transcodarr(&["--version"]).expect("Failed to run transcodarr --version");
 
     assert!(output.status.success(), "Version command should succeed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("transcoderr"),
+        stdout.contains("transcodarr"),
         "Version should contain program name"
     );
 }
@@ -119,7 +120,7 @@ fn test_info_command_requires_ffprobe() {
     }
 
     let test_file = &test_files[0];
-    let output = common::run_transcoderr(&["info", test_file.to_str().unwrap()])
+    let output = common::run_transcodarr(&["info", test_file.to_str().unwrap()])
         .expect("Failed to run info command");
 
     assert!(output.status.success(), "Info command should succeed");
@@ -142,7 +143,7 @@ fn test_info_all_media_files_dry() {
     }
 
     for test_file in test_files.iter() {
-        let output = common::run_transcoderr(&["info", test_file.to_str().unwrap()])
+        let output = common::run_transcodarr(&["info", test_file.to_str().unwrap()])
             .expect("Failed to run info command");
         assert!(
             output.status.success(),
@@ -164,7 +165,7 @@ fn test_transcode_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -193,7 +194,7 @@ fn test_transcode_dry_run() {
 fn transcode_dry_run_default_output_suffix_and_mkv() {
     let test_file = common::testdata_dir().join("test_bars_480p_h265_aac.mkv");
     // Omit output argument; expect default `<stem>_transcoded.mkv` next to input
-    let output = common::run_transcoderr(&["transcode", test_file.to_str().unwrap(), "--dry-run"])
+    let output = common::run_transcodarr(&["transcode", test_file.to_str().unwrap(), "--dry-run"])
         .expect("Failed to run transcode dry-run with default output");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -223,7 +224,7 @@ fn test_transcode_dry_run_all_formats_to_multiple_exts() {
     for test_file in test_files.iter() {
         for ext in exts.iter() {
             let out = temp_dir.path().join(format!("output.{}", ext));
-            let output = common::run_transcoderr(&[
+            let output = common::run_transcodarr(&[
                 "transcode",
                 test_file.to_str().unwrap(),
                 out.to_str().unwrap(),
@@ -252,7 +253,7 @@ fn test_transcode_preset_original_h265_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -286,7 +287,7 @@ fn test_transcode_preset_tv_h265_fast_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -318,7 +319,7 @@ fn test_transcode_preset_movie_quality_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -360,7 +361,7 @@ fn test_transcode_actual_execution() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),
@@ -393,7 +394,7 @@ fn test_batch_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_dir = temp_dir.path().join("output");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         testdata_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
@@ -425,7 +426,7 @@ fn test_batch_with_preset_dry_run() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_dir = temp_dir.path().join("output");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         testdata_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
@@ -458,7 +459,7 @@ fn test_batch_dry_run_with_input_exts() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_dir = temp_dir.path().join("output");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         testdata_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
@@ -488,7 +489,7 @@ fn test_batch_actual_execution() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_dir = temp_dir.path().join("output");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "batch",
         testdata_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
@@ -529,7 +530,7 @@ fn test_invalid_preset_shows_error() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_path = temp_dir.path().join("output.mkv");
 
-    let output = common::run_transcoderr(&[
+    let output = common::run_transcodarr(&[
         "transcode",
         test_file.to_str().unwrap(),
         output_path.to_str().unwrap(),

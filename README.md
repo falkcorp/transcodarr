@@ -1,8 +1,9 @@
 <!-- file: README.md -->
-<!-- version: 0.8.0 -->
+<!-- version: 0.9.0 -->
 <!-- guid: 0a1b2c3d-4e5f-6789-abcd-ef0123456789 -->
+<!-- last-edited: 2026-07-31 -->
 
-# transcoderr
+# transcodarr
 
  A Rust CLI that wraps ffmpeg/ffprobe to transcode media while preserving metadata. Designed for batch conversion of TV shows and movies to modern codecs (h265/aac).
 
@@ -39,7 +40,7 @@ cargo run -- info testdata/test_color_720p_h264_aac.mp4 --json
 cargo run -- transcode input.mp4 output.mkv --vcodec libx265 --acodec aac
 
 # Transcode with implicit output (safe default)
-# When output is omitted, transcoderr writes next to the input as `<name>_transcoded.mkv`
+# When output is omitted, transcodarr writes next to the input as `<name>_transcoded.mkv`
 cargo run -- transcode input.mp4 --preset original-h265 --dry-run
 
 # Use preset for original quality (h265+aac 256k, CRF 18, preset slow)

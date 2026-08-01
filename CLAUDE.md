@@ -1,11 +1,11 @@
 <!-- file: CLAUDE.md -->
-<!-- version: 2.4.0 -->
+<!-- version: 2.5.0 -->
 <!-- guid: 3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f -->
-<!-- last-edited: 2026-07-21 -->
+<!-- last-edited: 2026-07-31 -->
 
 # CLAUDE.md
 
-transcoderr is a Rust CLI tool that wraps ffmpeg/ffprobe to transcode media files
+transcodarr is a Rust CLI tool that wraps ffmpeg/ffprobe to transcode media files
 while preserving metadata. Single binary, entry point at `src/main.rs`.
 
 ## Coding Standards

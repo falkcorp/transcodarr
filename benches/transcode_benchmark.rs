@@ -1,8 +1,9 @@
 // file: benches/transcode_benchmark.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 3c4d5e6f-7890-abcd-ef01-23456789abcd
+// last-edited: 2026-07-31
 
-//! Benchmarks for transcoderr operations
+//! Benchmarks for transcodarr operations
 //! Run with: cargo bench
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -22,9 +23,9 @@ fn binary_path() -> PathBuf {
     path.push("target");
     path.push("release");
     path.push(if cfg!(windows) {
-        "transcoderr.exe"
+        "transcodarr.exe"
     } else {
-        "transcoderr"
+        "transcodarr"
     });
     path
 }

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # file: scripts/generate_test_media.py
-# version: 1.1.0
+# version: 1.2.0
 # guid: 7b0c2a9e-3f5d-4a6b-9c8d-1e2f3a4b5c6d
+# last-edited: 2026-07-31
 
 """
-Generate small test media files for transcoderr using ffmpeg/ffprobe.
+Generate small test media files for transcodarr using ffmpeg/ffprobe.
 
 Outputs are written to ./testdata/ (gitignored).
 
@@ -58,7 +59,7 @@ def make_color_mp4(out: Path) -> None:
         "-metadata",
         "title=Color Pattern",
         "-metadata",
-        "artist=Transcoderr",
+        "artist=Transcodarr",
         "-c:v",
         "libx264",
         "-pix_fmt",
