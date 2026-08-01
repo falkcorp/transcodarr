@@ -1,5 +1,5 @@
 // file: src/main.rs
-// version: 0.8.0
+// version: 0.9.0
 // guid: 0f9e8d7c-6b5a-4c3d-2e1f-0a9b8c7d6e5f
 // last-edited: 2026-07-31
 
@@ -330,7 +330,7 @@ fn transcode(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .with_context(|| format!("failed to spawn ffmpeg; args: {:?}", &args))?;
+        .with_context(|| format!("failed to spawn ffmpeg; args: {:?}", args))?;
 
     if !status.success() {
         bail!("ffmpeg exited with status: {:?}", status.code());
@@ -338,6 +338,11 @@ fn transcode(
     Ok(())
 }
 
+// The long parameter list mirrors the CLI surface one-for-one. The crate
+// extraction in docs/design/distributed-architecture.md dissolves it by moving
+// output-path and preset logic into transcodarr-core, so it is allowed here
+// rather than papered over with a parameter struct that pass would delete.
+#[allow(clippy::too_many_arguments)]
 fn batch_transcode(
     input_dir: &str,
     output_dir: &str,
