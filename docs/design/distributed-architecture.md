@@ -1,13 +1,13 @@
 <!-- file: docs/design/distributed-architecture.md -->
-<!-- version: 1.0.1 -->
+<!-- version: 1.1.0 -->
 <!-- guid: f15e2f8e-1e3b-4ac5-a124-9ce13a18ab26 -->
 <!-- last-edited: 2026-07-31 -->
 
-# transcoderr — Distributed Transcode Orchestrator
+# transcodarr — Distributed Transcode Orchestrator
 
 ## Overview
 
-`transcoderr` is a distributed media transcode orchestrator: one Rust binary that runs
+`transcodarr` is a distributed media transcode orchestrator: one Rust binary that runs
 as a control plane on the storage server, as an agent on every worker node, and as a
 legacy single-file CLI escape hatch. It scans media libraries, stores probe facts in an
 indexed embedded database, evaluates a typed policy against those stored facts, and
@@ -70,17 +70,17 @@ deadlock. Defaults trace to measurements: `global.video_gpu = 3` (NVENC aggregat
 
 | Crate | Owns | Never does |
 | --- | --- | --- |
-| `transcoderr-core` | `MediaProbe`, `FileFacts`, `Policy`/`Rule`/`Decision`, `Capability`/`Requirement`, `PathTranslator`, `EncodePlan`, `ValidationSpec`, `FailureClass` | any I/O; no tokio, rusqlite or tonic |
-| `transcoderr-proto` | tonic-build output from `proto/transcoderr/v1/agent.proto`, plus `From`/`TryFrom` to core types | domain logic |
-| `transcoderr-store` | `Db`, `Migrator`, `Writer`, `ReadPool`, the ten repositories, `StoreError` | policy decisions |
-| `transcoderr-server` | `Dispatcher`, `CapacityLedger`, `ReadyIndex`, `Scanner`, `Evaluator`, `Reconciler`, `ScheduleEngine`, `ProgressHub`, `ApiServer` | run ffmpeg |
-| `transcoderr-agent` | `CapabilityProber`, `TrialDecode`, `RenameProbe`, `Executor`, `OutputValidator`, `AtomicReplacer`, `CommitRitual`, `IntentJournal` | decide policy |
-| `transcoderr-cli` | `Cli`, `Command::{Server, Agent, Local, Admin}` | anything else |
+| `transcodarr-core` | `MediaProbe`, `FileFacts`, `Policy`/`Rule`/`Decision`, `Capability`/`Requirement`, `PathTranslator`, `EncodePlan`, `ValidationSpec`, `FailureClass` | any I/O; no tokio, rusqlite or tonic |
+| `transcodarr-proto` | tonic-build output from `proto/transcodarr/v1/agent.proto`, plus `From`/`TryFrom` to core types | domain logic |
+| `transcodarr-store` | `Db`, `Migrator`, `Writer`, `ReadPool`, the ten repositories, `StoreError` | policy decisions |
+| `transcodarr-server` | `Dispatcher`, `CapacityLedger`, `ReadyIndex`, `Scanner`, `Evaluator`, `Reconciler`, `ScheduleEngine`, `ProgressHub`, `ApiServer` | run ffmpeg |
+| `transcodarr-agent` | `CapabilityProber`, `TrialDecode`, `RenameProbe`, `Executor`, `OutputValidator`, `AtomicReplacer`, `CommitRitual`, `IntentJournal` | decide policy |
+| `transcodarr-cli` | `Cli`, `Command::{Server, Agent, Local, Admin}` | anything else |
 
-`transcoderr-core` is the correctness argument: server and agent link the *same*
+`transcodarr-core` is the correctness argument: server and agent link the *same*
 `satisfies` and `validate_output`, so agent-side re-validation is a genuine detector of a
 stale capability model rather than a second, subtly different implementation. Any
-`JobRejected` increments `transcoderr_agent_rejections_total{agent,reason}` and is
+`JobRejected` increments `transcodarr_agent_rejections_total{agent,reason}` and is
 alarmed as a server bug, never absorbed as a routine retry.
 
 ```mermaid
@@ -129,7 +129,7 @@ replacement reclaims nothing, so reclaim is read from `zfs used`/`usedbysnapshot
 `pool_reclaim_sample` and a snapshot preflight gates commit; free space is reserved
 against one server-assigned `PoolId`, never per mount or per agent; the DB location is
 validated by a measured fsync-latency probe exported as
-`transcoderr_db_fsync_latency_seconds`, not by fstype; each agent must pass a
+`transcodarr_db_fsync_latency_seconds`, not by fstype; each agent must pass a
 rename-over-an-existing-open-destination probe before `agent.commit_eligible` is set; and
 a cross-device work area is a hard dispatch gate (`BlockStage::WorkAreaCrossDevice`), not
 a warning.
@@ -141,20 +141,20 @@ a warning.
 The repository becomes a Cargo workspace. The single `src/main.rs` is dissolved; nothing is deleted, everything is relocated.
 
 ```
-transcoderr/
+transcodarr/
   Cargo.toml                     # [workspace] only — virtual manifest
   Cargo.lock                     # committed (already is; .gitignore lies, leave it)
   clippy.toml  rustfmt.toml      # unchanged, apply workspace-wide
   crates/
-    transcoderr-core/            # pure domain, no I/O
-    transcoderr-proto/           # tonic/prost wire types + conversions
-    transcoderr-store/           # rusqlite, migrations, Writer, repositories
-    transcoderr-server/          # dispatcher, scanner, evaluator, api, ui, metrics
-    transcoderr-agent/           # capability probing, ffmpeg exec, commit ritual
-    transcoderr-cli/             # bin `transcoderr`: server|agent|local|admin
-    transcoderr-testkit/         # dev-only harness (NAME NOT IN CONTRACT — added here)
+    transcodarr-core/            # pure domain, no I/O
+    transcodarr-proto/           # tonic/prost wire types + conversions
+    transcodarr-store/           # rusqlite, migrations, Writer, repositories
+    transcodarr-server/          # dispatcher, scanner, evaluator, api, ui, metrics
+    transcodarr-agent/           # capability probing, ffmpeg exec, commit ritual
+    transcodarr-cli/             # bin `transcodarr`: server|agent|local|admin
+    transcodarr-testkit/         # dev-only harness (NAME NOT IN CONTRACT — added here)
     xtask/                       # `cargo xtask proto` codegen (added here)
-  proto/transcoderr/v1/agent.proto
+  proto/transcodarr/v1/agent.proto
   migrations/NNNN_name.sql
   ui/                            # index.html, app.js, style.css, favicon.svg
   deploy/                        # systemd units, grafana dashboard, alerts.yml
@@ -204,21 +204,21 @@ core  <-  proto  <-  store  <-  server
   +------------------- cli -------+   (cli -> core, server, agent, store)
 ```
 
-`transcoderr-core` depends on **no** internal crate and on no async, DB, or network crate. `transcoderr-agent` depends on `core` + `proto` only — never on `store`; an agent must be scp-able to the WSL2 node without dragging SQLite along. `transcoderr-server` is the only crate that links `store`.
+`transcodarr-core` depends on **no** internal crate and on no async, DB, or network crate. `transcodarr-agent` depends on `core` + `proto` only — never on `store`; an agent must be scp-able to the WSL2 node without dragging SQLite along. `transcodarr-server` is the only crate that links `store`.
 
 Every library crate opens with:
 
 ```rust
-// file: crates/transcoderr-core/src/lib.rs
+// file: crates/transcodarr-core/src/lib.rs
 // version: 1.0.0
 // guid: <new uuid>
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! Pure domain model for transcoderr: probe facts, policy, capability
+//! Pure domain model for transcodarr: probe facts, policy, capability
 //! matching, encode plans, and output validation. No I/O, no async.
 ```
 
-### transcoderr-core
+### transcodarr-core
 
 The crown jewel and the entire unit-test surface. Modules: `probe`, `facts`, `policy`, `plan`, `capability`, `paths`, `validate`, `failure`, `job`, `preset`.
 
@@ -249,19 +249,19 @@ impl PathTranslator {
 
 Because `satisfies` and `validate_output` live here, the server and the agent execute *literally the same bytes* for matching and validation — that is what makes agent-side re-validation a genuine bug detector rather than a second implementation that can drift.
 
-### transcoderr-proto
+### transcodarr-proto
 
-`build.rs` runs `tonic_build` only when `TRANSCODERR_REGEN_PROTO=1`; otherwise it `include!`s checked-in generated code under `src/generated/transcoderr.v1.rs`. `protoc` is not installed on U0 and must not become a build dependency; `cargo xtask proto` regenerates using `protoc-bin-vendored` and CI asserts the committed output is byte-identical. Beyond generated types the crate hand-writes the boundary conversions, which is where wire laxity is turned into typed domain values:
+`build.rs` runs `tonic_build` only when `TRANSCODARR_REGEN_PROTO=1`; otherwise it `include!`s checked-in generated code under `src/generated/transcodarr.v1.rs`. `protoc` is not installed on U0 and must not become a build dependency; `cargo xtask proto` regenerates using `protoc-bin-vendored` and CI asserts the committed output is byte-identical. Beyond generated types the crate hand-writes the boundary conversions, which is where wire laxity is turned into typed domain values:
 
 ```rust
-impl TryFrom<pb::Capability> for transcoderr_core::Capability { type Error = ProtoError; }
-impl From<transcoderr_core::Requirements> for pb::Requirements { }
-impl TryFrom<pb::JobResult>  for transcoderr_core::Outcome     { type Error = ProtoError; }
+impl TryFrom<pb::Capability> for transcodarr_core::Capability { type Error = ProtoError; }
+impl From<transcodarr_core::Requirements> for pb::Requirements { }
+impl TryFrom<pb::JobResult>  for transcodarr_core::Outcome     { type Error = ProtoError; }
 pub const PROTO_VERSION: u32 = 1;
 pub const MIN_SUPPORTED_PROTO: u32 = 1;
 ```
 
-### transcoderr-store
+### transcodarr-store
 
 Owns SQLite and nothing else. `Db::open` applies the pragma block, runs `Migrator` against embedded `include_str!` migrations, records `schema_migration`, and performs the startup fsync-latency probe (hard abort — fstype checking is useless in an all-ZFS environment). Public surface is `Db`, `Migrator`, `Writer`/`WriteOp`/`WriteLane`, `ReadPool`, `StoreError`, and the repositories named in the contract: `FileRepo`, `JobRepo`, `AgentRepo`, `LibraryRepo`, `ConfigRepo`, `ScheduleRepo`, `TrashRepo`, `CommitIntentRepo`, `DispatchBlockRepo`, `PoolRepo`.
 
@@ -273,21 +273,21 @@ impl JobRepo {
 }
 ```
 
-Repositories return domain types from `transcoderr-core`, never `rusqlite::Row`. No SQL string escapes this crate — that is the structural guarantee against a "getAll then filter in JS" equivalent reappearing.
+Repositories return domain types from `transcodarr-core`, never `rusqlite::Row`. No SQL string escapes this crate — that is the structural guarantee against a "getAll then filter in JS" equivalent reappearing.
 
-### transcoderr-server
+### transcodarr-server
 
 Modules map one-to-one onto the process-model table: `dispatch` (`Dispatcher`, `CapacityLedger`, `ReadyIndex`, `RequirementBucket`, `EligibilityBitset`), `agents` (`AgentTable`, `AgentSession`), `scanner`, `evaluator`, `reconciler`, `schedule`, `pressure`, `progress`, `config`, `api`, `ui`, `metrics`. `#![deny(clippy::disallowed_types)]` with a module-scoped ban on `std::sync::Mutex`, `rusqlite::*` and `std::fs` inside `dispatch` — the single-owner dispatcher is a discipline property and discipline needs a lint.
 
 The UI is `#[derive(RustEmbed)] #[folder = "../../ui/"]` with `debug-embed = false`, so debug builds serve from disk and release builds compile the assets in. `cargo build` alone yields a working server: no bundler, no `node_modules`.
 
-### transcoderr-agent
+### transcodarr-agent
 
 `AgentRuntime`, `ConnectClient`, `CapabilityProber`, `TrialDecode`, `RenameProbe`, `CpuQuotaReader`, `Executor`, `FfmpegProcess`, `ProgressTailer`, `OutputValidator`, `AtomicReplacer`, `CommitRitual`, `IntentJournal`, `InflightJournal`, `WorkArea`, `TrashCan`, `Drainer`. This is the **only** crate permitted to call `std::fs::rename`, `remove_file`, or `remove_dir_all` on a media path, and only from `agent::fsops`; a CI grep test over the workspace fails the build on any other call site.
 
-### transcoderr-cli
+### transcodarr-cli
 
-The one shipped binary, `[[bin]] name = "transcoderr" path = "src/main.rs"`.
+The one shipped binary, `[[bin]] name = "transcodarr" path = "src/main.rs"`.
 
 ```rust
 #[derive(Subcommand)]
@@ -305,9 +305,9 @@ pub enum AdminCommand { Diagnose, Explain, Queue, Trash, Config, Fsck, RollingUp
 
 ### Keeping the existing CLI working
 
-This is a hard constraint, not a courtesy: `transcoderr local` is the escape hatch used when the orchestrator itself is broken.
+This is a hard constraint, not a courtesy: `transcodarr local` is the escape hatch used when the orchestrator itself is broken.
 
-**Argument compatibility.** The existing top-level verbs are preserved as an alias layer. `transcoderr transcode ...`, `batch ...` and `info ...` remain valid and are rewritten to `local <verb>` before clap parsing, via a `#[command(alias)]` on each `LocalCommand` variant plus a hidden pre-parse shim in `main`. Every flag keeps its current name, default and semantics, including `--input-exts "mp4,mkv,avi,mov,m4v,ts"` and the `_transcoded.<ext>` default output.
+**Argument compatibility.** The existing top-level verbs are preserved as an alias layer. `transcodarr transcode ...`, `batch ...` and `info ...` remain valid and are rewritten to `local <verb>` before clap parsing, via a `#[command(alias)]` on each `LocalCommand` variant plus a hidden pre-parse shim in `main`. Every flag keeps its current name, default and semantics, including `--input-exts "mp4,mkv,avi,mov,m4v,ts"` and the `_transcoded.<ext>` default output.
 
 **Where today's code lands.**
 
@@ -320,19 +320,19 @@ This is a hard constraint, not a courtesy: `transcoderr local` is the escape hat
 | `Command::new("ffmpeg")` with inherited stdio | `cli::local::run_ffmpeg` (kept, CLI-only) and, separately, `agent::Executor` (async, captured, `-progress` file) |
 | `info` ffprobe invocation | `cli::local::info` printing; the JSON path now goes through `core::parse_ffprobe_json` |
 | `collect_media_files` | `cli::local::collect_media_files`, verbatim. It performs I/O so it may not enter `core`; the server's `Scanner` gets its own `walkdir` implementation with symlink, depth and exclude-glob guards |
-| `Cli`/`Commands`, `fn main`, all `println!` | `transcoderr-cli` |
+| `Cli`/`Commands`, `fn main`, all `println!` | `transcodarr-cli` |
 
-**Tests and benches move with the binary.** `tests/` and `benches/` relocate to `crates/transcoderr-cli/`, because a virtual workspace root builds neither. `tests/common/mod.rs` needs exactly one change — `project_root()` walks up two extra levels from `CARGO_MANIFEST_DIR` — after which `binary_path()` still resolves `target/debug/transcoderr` (the workspace target dir stays at the repo root) and all sixteen tests compile unchanged. The duplicated helpers in `benches/transcode_benchmark.rs` are replaced by `transcoderr-testkit`, which both tests and benches may depend on as a dev-dependency.
+**Tests and benches move with the binary.** `tests/` and `benches/` relocate to `crates/transcodarr-cli/`, because a virtual workspace root builds neither. `tests/common/mod.rs` needs exactly one change — `project_root()` walks up two extra levels from `CARGO_MANIFEST_DIR` — after which `binary_path()` still resolves `target/debug/transcodarr` (the workspace target dir stays at the repo root) and all sixteen tests compile unchanged. The duplicated helpers in `benches/transcode_benchmark.rs` are replaced by `transcodarr-testkit`, which both tests and benches may depend on as a dev-dependency.
 
 **Two real bugs are fixed during extraction, not after.** `fs::create_dir_all` moves *below* the `if dry_run { continue; }` check so `--dry-run` no longer mutates the filesystem, and unknown preset names error. That takes the suite from 11/16 to 14/16; the remaining three failures are the LFS-pointer fixtures, resolved by having `testkit` invoke `scripts/generate_test_media.py` on demand and by reconciling the `..._aac.mkv` / `..._opus.mkv` naming mismatch in favour of what the generator actually produces.
 
-**M1 exit criterion:** `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` all green across the six crates, with the `local` subcommand behaviourally identical to today's binary and the full R70 fixture set passing inside `transcoderr-core` with no network, no DB and no agent.
+**M1 exit criterion:** `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` all green across the six crates, with the `local` subcommand behaviourally identical to today's binary and the full R70 fixture set passing inside `transcodarr-core` with no network, no DB and no agent.
 
 ## Data Model
 
 ### Conventions
 
-SQLite, one file, **`STRICT` tables everywhere** (verified on the 3.46 in this environment). STRICT permits only `INTEGER`, `REAL`, `TEXT`, `BLOB`, `ANY`, so booleans are `INTEGER NOT NULL CHECK(x IN (0,1))` and every timestamp is an explicit `*_unix` (seconds) or `*_unix_ms` (epoch millis, used only where dispatch latency is measured). Enums are `TEXT` with `CHECK` lists whose spellings match the `serde` representation of the corresponding `transcoderr-core` enum exactly — `JobState` is `PascalCase`, everything else is `snake_case`. JSON columns are suffixed `_json` and are never queried with `json_extract` on the hot path; anything the dispatcher, evaluator or UI filters on is promoted to a real column.
+SQLite, one file, **`STRICT` tables everywhere** (verified on the 3.46 in this environment). STRICT permits only `INTEGER`, `REAL`, `TEXT`, `BLOB`, `ANY`, so booleans are `INTEGER NOT NULL CHECK(x IN (0,1))` and every timestamp is an explicit `*_unix` (seconds) or `*_unix_ms` (epoch millis, used only where dispatch latency is measured). Enums are `TEXT` with `CHECK` lists whose spellings match the `serde` representation of the corresponding `transcodarr-core` enum exactly — `JobState` is `PascalCase`, everything else is `snake_case`. JSON columns are suffixed `_json` and are never queried with `json_extract` on the hot path; anything the dispatcher, evaluator or UI filters on is promoted to a real column.
 
 Boot pragmas, asserted by `Db::open` and re-asserted after each connection is handed out by `ReadPool`:
 
@@ -778,11 +778,11 @@ CREATE INDEX idx_override_expiry ON schedule_override(expires_unix);
 | `idx_job_backoff` | `LeaseTimer` rehydration of `Retrying` jobs whose backoff elapsed. |
 | `idx_job_agent` | Agent detail page, drain progress, and releasing permits on disconnect. |
 | `idx_job_file` | Job history for one file (`/files/{id}/explain`), newest first. |
-| `idx_job_state` | `transcoderr_queue_depth{state,class,size_bucket}` gauge refresh — one grouped scan. |
+| `idx_job_state` | `transcodarr_queue_depth{state,class,size_bucket}` gauge refresh — one grouped scan. |
 | `idx_job_dead` | Dead-letter view grouped by `terminal_reason`. |
 | `idx_event_job` / `idx_event_time` | Job timeline render; nightly retention prune by age. |
 | `idx_attempt_failure` | Capability-drift analysis: which agent fails which `failure_code`. |
-| `idx_intent_live` | Uniqueness enforcement plus `transcoderr_commit_intents_live`. |
+| `idx_intent_live` | Uniqueness enforcement plus `transcodarr_commit_intents_live`. |
 | `idx_intent_agent_live` | Agent-scoped crash recovery on reconnect. |
 | `idx_intent_job_attempt` | `ReportCommit` idempotency lookup. |
 | `idx_trash_purge` | Reaper: `WHERE purge_after_unix<? AND restored_unix IS NULL`. |
@@ -790,8 +790,8 @@ CREATE INDEX idx_override_expiry ON schedule_override(expires_unix);
 | `idx_agent_status` | Dispatcher cold-start hydration and the agents view. |
 | `idx_caphist` | "What changed on this agent" page, newest first. |
 | `idx_capovr_expiry` | Sweeping expired negative capabilities so a transient GPU fault is not permanent. |
-| `idx_block_stage` | `transcoderr_dispatch_blocked_total{stage}` and the Queue view's inline reason column. |
-| `idx_reclaim_pool_time` | Latest ZFS accounting sample for `transcoderr_pool_reclaim_effective_bytes`. |
+| `idx_block_stage` | `transcodarr_dispatch_blocked_total{stage}` and the Queue view's inline reason column. |
+| `idx_reclaim_pool_time` | Latest ZFS accounting sample for `transcodarr_pool_reclaim_effective_bytes`. |
 | `idx_window_enabled`, `idx_override_expiry` | `ScheduleEngine`'s 30s recompute of `EffectiveLimits`. |
 
 ### Retention
@@ -800,10 +800,10 @@ Nightly, in `WriteLane::Bulk`: delete `job_event`/`job_attempt` for terminal job
 
 ## Job State Machine
 
-`JobState` is the single authority on work-in-flight. It never encodes anything about the file itself — that is `FileState` — and it is never consulted to decide library eligibility (Tdarr failure mode 7). It is defined once, in `transcoderr-core`, and both the server and the agent link the same enum.
+`JobState` is the single authority on work-in-flight. It never encodes anything about the file itself — that is `FileState` — and it is never consulted to decide library eligibility (Tdarr failure mode 7). It is defined once, in `transcodarr-core`, and both the server and the agent link the same enum.
 
 ```rust
-// crates/transcoderr-core/src/job/state.rs
+// crates/transcodarr-core/src/job/state.rs
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JobState {
@@ -858,7 +858,7 @@ VALUES (:job_id, :now_ms, :from, :to, :agent_id, :attempt, :reason_code, :detail
 ```
 
 ```rust
-// transcoderr-store
+// transcodarr-store
 impl JobRepo {
     pub fn transition(&self, tx: &Transaction<'_>, t: &Transition)
         -> Result<(), TransitionError>;
@@ -888,7 +888,7 @@ The `job.state` CHECK constraint carries all thirteen variants (the base schema 
 | `Eligible` | `Assigned` | `Dispatcher::commit_assignment` — permits acquired, argv persisted to `job_attempt` **before** the offer is sent | `dispatched` |
 | `Assigned` | `Running` | `AgentMessage::JobStarted` (pid + echoed argv, which must equal what was sent) | `agent_started` |
 | `Assigned` | `Eligible` | no `JobAccepted` within `assign_ack_timeout` (30s), or `try_send` to the agent channel failed (A7) | `assign_timeout`, `offer_undeliverable` |
-| `Assigned` | `Retrying` | `JobRejected` with a capability-drift reason: writes `agent_capability_override`, adds the agent to `excluded_agents_json`, bumps `transcoderr_agent_rejections_total` — **alarmed as a server bug** | `agent_rejected_capability` |
+| `Assigned` | `Retrying` | `JobRejected` with a capability-drift reason: writes `agent_capability_override`, adds the agent to `excluded_agents_json`, bumps `transcodarr_agent_rejections_total` — **alarmed as a server bug** | `agent_rejected_capability` |
 | `Assigned` | `Eligible` | `JobRejected` with a transient reason (busy, draining): never excludes, never dead-letters (A13) | `agent_rejected_transient` |
 | `Running` | `Verifying` | ffmpeg exit 0, no signal | `ffmpeg_exit_0` |
 | `Running` | `Retrying` | `FailureClass::Transient` — backoff via `not_before_unix = now + min(30s·2^(n-1), 30m) ± 50%` | `transient_failure` |
@@ -964,11 +964,11 @@ Per state:
 | `Installed` | rename done, ack lost | verify final path probes to the recorded output; `Succeeded` with write-through; `resolution='confirmed'` |
 | any | source absent, no trash entry, no valid temp | `NeedsOperator`; `resolution='escalated'` |
 
-Each resolution increments `transcoderr_commit_intent_recovered_total{resolution}`; `transcoderr_commit_intents_live` and `transcoderr_needs_operator_current` are exported continuously.
+Each resolution increments `transcodarr_commit_intent_recovered_total{resolution}`; `transcodarr_commit_intents_live` and `transcodarr_needs_operator_current` are exported continuously.
 
 ### Agent crash
 
-The server sees a stream close or a missed lease. Stream close is treated as immediate lease expiry (faster than TTL); leases are computed in **server time from server-observed arrivals**, so WSL2 clock drift cannot expire a healthy lease. `Reconciler` then, per job: release permits (leaving the admitted set), append `job_event{reason_code:'lease_expired'}`, and move `Assigned`/`Running`/`Verifying` to `Retrying` with `FailureCode::AgentLost` (transient, consumes an attempt). `Committing` jobs are **never** auto-requeued while a live intent exists — they wait for intent resolution, because the replace window may be half-done. `transcoderr_orphans_reconciled_total{kind}` counts leases, temps and intents separately. After `agent.circuit_breaker_failures` consecutive failures with zero successes the agent is `Quarantined` and its jobs are excluded from it (B17).
+The server sees a stream close or a missed lease. Stream close is treated as immediate lease expiry (faster than TTL); leases are computed in **server time from server-observed arrivals**, so WSL2 clock drift cannot expire a healthy lease. `Reconciler` then, per job: release permits (leaving the admitted set), append `job_event{reason_code:'lease_expired'}`, and move `Assigned`/`Running`/`Verifying` to `Retrying` with `FailureCode::AgentLost` (transient, consumes an attempt). `Committing` jobs are **never** auto-requeued while a live intent exists — they wait for intent resolution, because the replace window may be half-done. `transcodarr_orphans_reconciled_total{kind}` counts leases, temps and intents separately. After `agent.circuit_breaker_failures` consecutive failures with zero successes the agent is `Quarantined` and its jobs are excluded from it (B17).
 
 ### Agent reconnect
 
@@ -980,11 +980,11 @@ One unary RPC for the handshake and one long-lived bidirectional stream for ever
 
 ### The `.proto` file
 
-`crates/transcoderr-proto/proto/transcoderr/v1/agent.proto`:
+`crates/transcodarr-proto/proto/transcodarr/v1/agent.proto`:
 
 ```proto
 syntax = "proto3";
-package transcoderr.v1;
+package transcodarr.v1;
 
 service AgentService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
@@ -1245,9 +1245,9 @@ pub struct ReconnectPolicy { base: Duration, max: Duration, jitter: f64, grace: 
 
 `Connecting → Live`: open `Connect`, send `Hello{fencing_epoch, running_job_ids}`, wait for `Welcome`. Kill and clean anything in `unknown_job_ids`. If `Welcome.fencing_epoch != Hello.fencing_epoch`, the server has fenced this instance: abandon all in-flight jobs without committing, delete temps, and adopt the new epoch.
 
-In `Live` the agent runs three concurrent pumps. Outbound priority lanes: `JobResult`, `CommitIntentOpen`, `JobAccepted`/`JobRejected`, `JobStarted`, `DrainStatus`, `Heartbeat` are **lossless** — the sender blocks on a full channel. `Progress` and `LogLines` are **lossy**: rate-limited to `progress_interval_ms`, sent with `try_send`, dropped on congestion, counted in `transcoderr_progress_messages_dropped_total{agent}`.
+In `Live` the agent runs three concurrent pumps. Outbound priority lanes: `JobResult`, `CommitIntentOpen`, `JobAccepted`/`JobRejected`, `JobStarted`, `DrainStatus`, `Heartbeat` are **lossless** — the sender blocks on a full channel. `Progress` and `LogLines` are **lossy**: rate-limited to `progress_interval_ms`, sent with `try_send`, dropped on congestion, counted in `transcodarr_progress_messages_dropped_total{agent}`.
 
-An assignment is re-validated locally with the *same* `transcoderr_core::satisfies` the server used. A mismatch emits `JobRejected` with the serialized `UnmetRequirement`; `transient=false` means capability drift and is alarmed as a server-side model bug, `transient=true` (session exhaustion, mount momentarily gone) never excludes the agent and never dead-letters (A13, C8). The agent also refuses a `job_id` it is already running, and refuses any assignment whose `fencing_epoch` is stale.
+An assignment is re-validated locally with the *same* `transcodarr_core::satisfies` the server used. A mismatch emits `JobRejected` with the serialized `UnmetRequirement`; `transient=false` means capability drift and is alarmed as a server-side model bug, `transient=true` (session exhaustion, mount momentarily gone) never excludes the agent and never dead-letters (A13, C8). The agent also refuses a `job_id` it is already running, and refuses any assignment whose `fencing_epoch` is stale.
 
 `Reconnecting`: stream loss does **not** kill running ffmpeg processes. Backoff is `min(1s · 2^n, 30s)` with ±50% jitter. Running jobs continue; results and commit opens queue in the lossless lane. If reconnection has not succeeded before `reconnect_grace` (default 300s), the agent self-fences: it stops before `CommitIntentOpen`, leaves the temp in place, and reports on reconnect. Commits already at `IntentPhase::Retired` are always completed to `Installed` — abandoning between retire and install is the one state that produces ambiguity.
 
@@ -1265,7 +1265,7 @@ impl AgentSession {
 }
 ```
 
-`on_register` gates in order: TLS/token; `proto_version` within `[min_supported_proto, server_proto_version]`; `agent_version >= min_agent_version`. Rejection is a clean unary error with a reason string that reaches the UI, and it changes nothing in the database. On accept, a new `boot_id` allocates `fencing_epoch = agent.fencing_epoch + 1`, invalidating every outstanding commit from the previous instance; a repeat `boot_id` reuses the epoch. The capability document is diffed against `agent.capability_hash`, appended to `agent_capability_history` with a readable `diff_summary`, and increments `transcoderr_agent_capability_hash_changes_total{agent}`. `commit_eligible` is set only if `rename_probe == RP_ATOMIC_VERIFIED`; otherwise the agent receives no commit-bearing work and `transcoderr_agent_commit_eligible{agent}` reads 0.
+`on_register` gates in order: TLS/token; `proto_version` within `[min_supported_proto, server_proto_version]`; `agent_version >= min_agent_version`. Rejection is a clean unary error with a reason string that reaches the UI, and it changes nothing in the database. On accept, a new `boot_id` allocates `fencing_epoch = agent.fencing_epoch + 1`, invalidating every outstanding commit from the previous instance; a repeat `boot_id` reuses the epoch. The capability document is diffed against `agent.capability_hash`, appended to `agent_capability_history` with a readable `diff_summary`, and increments `transcodarr_agent_capability_hash_changes_total{agent}`. `commit_eligible` is set only if `rename_probe == RP_ATOMIC_VERIFIED`; otherwise the agent receives no commit-bearing work and `transcodarr_agent_commit_eligible{agent}` reads 0.
 
 `Established` maps to `AgentStatus::{Online, Draining, Unhealthy, Quarantined}`. Leases are computed **entirely in server time from server-observed arrivals**; the agent contributes only monotonic durations. Heartbeat 5s, lease 30s: a missed lease marks `Unhealthy`, halts dispatch immediately, and emits `DispatchEvent::AgentDisconnected`. Recovery emits `DispatchEvent::AgentHealthRestored`, and an unconditional 5s safety pass exists so no health edge can be silently lost (B11). Stream close is treated as immediate lease expiry. In-flight jobs are *not* requeued at lease expiry — the `Reconciler` waits `reconnect_grace`, then sends `Revoke` (delivered on reconnect) with a bumped epoch and drives recovery from `commit_intent`, never from a shared-root sweep.
 
@@ -1290,11 +1290,11 @@ pub struct Dispatcher {
 }
 ```
 
-The critical section — `dispatch_round` — contains **zero `.await`**. It cannot read the DB, cannot touch the filesystem, cannot log synchronously to a slow sink. This is enforced mechanically, not by intent: `crates/transcoderr-server/src/dispatch/mod.rs` carries a module-scoped `clippy.toml` `disallowed-types` entry for `std::sync::Mutex`, `rusqlite::Connection`, and `std::fs::File`, and a CI grep test asserts the string `.await` appears nowhere inside `impl Dispatcher { fn dispatch_round`. This is the direct structural inversion of Tdarr failure mode 1: scanning, evaluation, and DB writes physically cannot occupy the dispatch thread because they are not reachable from it.
+The critical section — `dispatch_round` — contains **zero `.await`**. It cannot read the DB, cannot touch the filesystem, cannot log synchronously to a slow sink. This is enforced mechanically, not by intent: `crates/transcodarr-server/src/dispatch/mod.rs` carries a module-scoped `clippy.toml` `disallowed-types` entry for `std::sync::Mutex`, `rusqlite::Connection`, and `std::fs::File`, and a CI grep test asserts the string `.await` appears nowhere inside `impl Dispatcher { fn dispatch_round`. This is the direct structural inversion of Tdarr failure mode 1: scanning, evaluation, and DB writes physically cannot occupy the dispatch thread because they are not reachable from it.
 
-Sends to agents use `try_send` on a bounded `mpsc::Sender<ServerMessage>` (capacity 256). A full channel is never awaited — per flaw A7 it marks the agent `AgentStatus::Unhealthy`, returns the job to the queue via the requeue path, and increments `transcoderr_agent_rejections_total{reason="channel_full"}`.
+Sends to agents use `try_send` on a bounded `mpsc::Sender<ServerMessage>` (capacity 256). A full channel is never awaited — per flaw A7 it marks the agent `AgentStatus::Unhealthy`, returns the job to the queue via the requeue path, and increments `transcodarr_agent_rejections_total{reason="channel_full"}`.
 
-Wakeups come from `DispatchEvent`: `SlotReleased`, `JobEligible`, `AgentConnected`, `AgentDisconnected`, `AgentHealthRestored`, `ScheduleTick`, `ConfigApplied`, `BucketCreated`. A 5s unconditional safety pass runs regardless of `dirty` (flaw B11), and `transcoderr_dispatch_last_pass_unix` exposes a wedged dispatcher.
+Wakeups come from `DispatchEvent`: `SlotReleased`, `JobEligible`, `AgentConnected`, `AgentDisconnected`, `AgentHealthRestored`, `ScheduleTick`, `ConfigApplied`, `BucketCreated`. A 5s unconditional safety pass runs regardless of `dirty` (flaw B11), and `transcodarr_dispatch_last_pass_unix` exposes a wedged dispatcher.
 
 ### In-memory structures
 
@@ -1380,7 +1380,7 @@ impl Dispatcher {
                 }
             }
         }
-        metrics::histogram!("transcoderr_dispatch_round_duration_seconds")
+        metrics::histogram!("transcodarr_dispatch_round_duration_seconds")
             .record(t0.elapsed().as_secs_f64());
         stats
     }
@@ -1389,20 +1389,20 @@ impl Dispatcher {
 
 `commit_assignment` has an explicit failure branch that advances the `SkipCursor` (flaw D6) so a job that repeatedly fails compare-and-swap cannot pin the head forever. It is one `WriteLane::Commit` transaction: job `Eligible -> Assigned` via `UPDATE job SET state='Assigned', agent_id=?, fencing_epoch=?, lease_expires_unix=?, attempt=attempt+1 WHERE id=? AND state='Eligible'` (a lost CAS is a no-op, not a corruption), plus a `job_event` row and a `job_attempt` row containing the **exact translated argv written before the agent runs it**. Only then does the `Assignment` go out by `try_send`.
 
-`transcoderr_dispatch_latency_seconds` is measured from slot release to that `try_send`, target p99 ≤ 100ms.
+`transcodarr_dispatch_latency_seconds` is measured from slot release to that `try_send`, target p99 ≤ 100ms.
 
 ### Proof 1: an agent can never be offered work it cannot run
 
 Four independent claims, each mechanical:
 
-1. **`Assignment` is unconstructible outside the matcher.** The struct has private fields and one constructor, `Assignment::new(job, agent, permits) -> Assignment`, in `dispatch::assign`, which takes `&AcquiredPermits` and a `Verified` zero-sized witness. `Verified` is only produced by `fn verify(cap: &Capability, req: &Requirements) -> Result<Verified, UnmetRequirement>`, a thin wrapper over `transcoderr_core::satisfies`. There is no `force` flag, no override path, no `Assignment::from_job`.
+1. **`Assignment` is unconstructible outside the matcher.** The struct has private fields and one constructor, `Assignment::new(job, agent, permits) -> Assignment`, in `dispatch::assign`, which takes `&AcquiredPermits` and a `Verified` zero-sized witness. `Verified` is only produced by `fn verify(cap: &Capability, req: &Requirements) -> Result<Verified, UnmetRequirement>`, a thin wrapper over `transcodarr_core::satisfies`. There is no `force` flag, no override path, no `Assignment::from_job`.
 2. **`satisfies` is exhaustive.** `Requirement` is `#[non_exhaustive]` and `satisfies` matches every variant; adding a variant without handling it is a compile error, not a silently-unchecked requirement.
 3. **The bitset is a filter, never a grant.** `find_candidate` uses `EligibilityBitset` only to *skip* candidates fast; the selected job still runs the full `verify` plus the per-job `AdmissionCheck` set before `Assignment::new`. A stale bitset can lose throughput; it cannot produce a bad match.
 4. **Soft fallback does not satisfy.** `DecoderStatus::VerifiedSoftFallback` returns `Err(UnmetRequirement)` for a `Requirement::Decoder` whose `kind != Software`. This is the Turing Hi10 lesson as a type rule: the job that "works" on CPU while occupying an NVENC slot is never offered. `VerifiedFail` (Turing AV1, exit 69, 1KB output) likewise never matches.
 
 `Requirement::MountCovers` and the work-area device check (`BlockStage::WorkAreaCrossDevice`) and `commit_eligible` are all evaluated here, so path-translation failure and non-atomic rename are **dispatch-time ineligibilities, never runtime failures** (R21, flaw D4).
 
-Defence in depth: the agent re-runs the same `transcoderr-core::satisfies` on receipt and may emit `JobRejected`. Because both sides run literally the same function, a rejection means the server's capability model is stale — it increments `transcoderr_agent_rejections_total{agent,reason}` and is alerted at rate > 0, never absorbed as a routine retry (T8). Rejections split into capability-drift (writes an expirable `agent_capability_override`) and transient (never excludes, never dead-letters) per flaw A13.
+Defence in depth: the agent re-runs the same `transcodarr-core::satisfies` on receipt and may emit `JobRejected`. Because both sides run literally the same function, a rejection means the server's capability model is stale — it increments `transcodarr_agent_rejections_total{agent,reason}` and is alerted at rate > 0, never absorbed as a routine retry (T8). Rejections split into capability-drift (writes an expirable `agent_capability_override`) and transient (never excludes, never dead-letters) per flaw A13.
 
 ### Proof 2: undispatchable work cannot block other work
 
@@ -1412,28 +1412,28 @@ Tdarr failure mode 5 was a single global staged-file limit; failure mode 6 was r
 - **Queues are partitioned by `(JobClass, SizeBucket)`** (flaw A9). A `Large` job that cannot get the cluster-global large permit sits in the `(VideoGpu, Large)` queue and is physically not at the head of `(VideoGpu, Small)`. Head-of-line blocking is confined to one partition.
 - **Agent-first iteration.** The loop is "for each agent with a free slot, find work it can run" — never "for each job, find an agent". A free slot can only stay empty if *no* eligible job matches it, and that is recorded as a `dispatch_block` row, not inferred.
 - **Bounded skip with pushback.** Within a partition the dispatcher walks at most `K = 64` heads; inadmissible ones (space, mount freshness, hardlink) advance the `SkipCursor` rather than aborting the scan (flaw C3). An always-admit-one escape guarantees forward progress when every head is inadmissible.
-- **Starvation backstop.** If `agent.idle_since` exceeds 1s while its class queue is nonempty, the next round performs an unbounded scan for that agent, and `transcoderr_agent_slots_idle_with_eligible_work{agent,class}` goes non-zero — the metric that would have shown Tdarr's 8-of-48 ceiling on day one.
+- **Starvation backstop.** If `agent.idle_since` exceeds 1s while its class queue is nonempty, the next round performs an unbounded scan for that agent, and `transcodarr_agent_slots_idle_with_eligible_work{agent,class}` goes non-zero — the metric that would have shown Tdarr's 8-of-48 ceiling on day one.
 - **Requeue goes to the back.** `order_key = max(original_order_key + penalty(attempt), now_millis())`, plus `excluded_agents_json` barring the rejecting agent until every other eligible agent has been tried. There is no `bumped` flag and no smallest-first sort anywhere in the codebase; the livelock is unrepresentable. The two-stage follow-up video job is a **different function** — `derive_followup_job()` inserts a new row with `parent_job_id`, and shares no code with `requeue_job()` (T5).
 - **Per-class reservations inside the large pool** (flaw B10) stop the large-file cap from becoming a new failure mode 5, and follow-up video jobs get a priority band so they never starve behind bulk audio (flaw D7).
 - **Encoder relaxation** (flaw B12): a job unmatched for N minutes triggers re-plan against the next encoder in preference order, so a permanently absent GPU degrades to CPU rather than accumulating forever.
 
 ### Observability of the matcher
 
-Every non-dispatch is written, not inferred. One upserted `dispatch_block` row per queued job records `blocking_stage` (`BlockStage`: `LibraryDisabled | Backoff | NoAgentWithCapability | PathTranslation | NoFreeSlot | GlobalClassLimit | LargeFileLimit | FreeSpace | ScheduleWindow | AgentPaused | WorkAreaCrossDevice | NotCommitEligible`) plus a per-agent `UnmetRequirement` list, bounded by queue size. Paired metrics: `transcoderr_dispatch_blocked_total{stage}`, `transcoderr_dispatch_unmatched_total{reason}`, `transcoderr_slots_starved{class}`, and `transcoderr_unschedulable_work` for eligible jobs no configured agent could ever run (flaw D8, which also adds the `Eligible -> Blocked` edge).
+Every non-dispatch is written, not inferred. One upserted `dispatch_block` row per queued job records `blocking_stage` (`BlockStage`: `LibraryDisabled | Backoff | NoAgentWithCapability | PathTranslation | NoFreeSlot | GlobalClassLimit | LargeFileLimit | FreeSpace | ScheduleWindow | AgentPaused | WorkAreaCrossDevice | NotCommitEligible`) plus a per-agent `UnmetRequirement` list, bounded by queue size. Paired metrics: `transcodarr_dispatch_blocked_total{stage}`, `transcodarr_dispatch_unmatched_total{reason}`, `transcodarr_slots_starved{class}`, and `transcodarr_unschedulable_work` for eligible jobs no configured agent could ever run (flaw D8, which also adds the `Eligible -> Blocked` edge).
 
 ### Complexity
 
-Per round: O(A × C) agent/class pairs; per pair, bucket intersection is O(B) with B ≈ 8 over cached bitsets, then at most K = 64 heap peeks and one `satisfies` call of O(|Requirements|) ≈ 6. Total ≈ O(A·C·(B + K)), independent of queue depth (49.6k files, tens of thousands of jobs). Measured budget: `transcoderr_dispatch_round_duration_seconds` p99 under 5ms, alerted above it, because exceeding it is the early warning that someone reintroduced a scan proportional to queue size. Bucket cardinality is exported and asserted under an upper bound in tests.
+Per round: O(A × C) agent/class pairs; per pair, bucket intersection is O(B) with B ≈ 8 over cached bitsets, then at most K = 64 heap peeks and one `satisfies` call of O(|Requirements|) ≈ 6. Total ≈ O(A·C·(B + K)), independent of queue depth (49.6k files, tens of thousands of jobs). Measured budget: `transcodarr_dispatch_round_duration_seconds` p99 under 5ms, alerted above it, because exceeding it is the early warning that someone reintroduced a scan proportional to queue size. Bucket cardinality is exported and asserted under an upper bound in tests.
 
 ## Policy and Workflow Engine
 
 ### Decision: an ordered list of typed rules in TOML
 
-Three options were considered and two rejected. **Hardcoded** fails R43 outright, which requires the codec allow/deny lists to be configuration. A **small DSL** is a second language to debug at 3am — its own parser, its own type errors, its own test harness — and it would be the thing that is broken when the operator is least able to fix it. The observed policy space is small and closed: codec set membership, bit-depth mapping, HDR/DV veto, channel-count thresholds, size thresholds. A struct of optional AND-ed predicates covers it completely, is `serde`-derivable, is diffable, and produces compile-checked exhaustive matching in `transcoderr-core`.
+Three options were considered and two rejected. **Hardcoded** fails R43 outright, which requires the codec allow/deny lists to be configuration. A **small DSL** is a second language to debug at 3am — its own parser, its own type errors, its own test harness — and it would be the thing that is broken when the operator is least able to fix it. The observed policy space is small and closed: codec set membership, bit-depth mapping, HDR/DV veto, channel-count thresholds, size thresholds. A struct of optional AND-ed predicates covers it completely, is `serde`-derivable, is diffable, and produces compile-checked exhaustive matching in `transcodarr-core`.
 
 So: `Policy` is an ordered `Vec<Rule>`, each `Rule` a named `when`/`then` pair, deserialised from the same TOML file that carries concurrency limits, and hashed into a `RulesVersion`.
 
-### Core types (`transcoderr-core::policy`)
+### Core types (`transcodarr-core::policy`)
 
 ```rust
 /// Ordered rule list plus global thresholds. Deserialised from `[[rule]]` in config TOML.
@@ -1604,7 +1604,7 @@ ORDER BY f.id
 LIMIT 1000;                       -- served by idx_file_needs_eval
 ```
 
-Per-stream detail (channels, channel_layout, language, disposition) is fetched with one `WHERE file_id IN (...)` against `file_stream`'s primary key. Zero filesystem I/O, zero `ffprobe`. A full re-evaluation of 49.6k files is a handful of seconds; the cost is recorded in `transcoderr_policy_eval_duration_seconds` and the active hash in `transcoderr_policy_rules_version_info{hash}`.
+Per-stream detail (channels, channel_layout, language, disposition) is fetched with one `WHERE file_id IN (...)` against `file_stream`'s primary key. Zero filesystem I/O, zero `ffprobe`. A full re-evaluation of 49.6k files is a handful of seconds; the cost is recorded in `transcodarr_policy_eval_duration_seconds` and the active hash in `transcodarr_policy_rules_version_info{hash}`.
 
 Applying a new policy is one indexed statement, not a rescan:
 
@@ -1808,20 +1808,20 @@ impl CapacityLedger {
     /// outstanding permits — over-limit is a legal, observable, transient state.
     pub fn set_limits(&mut self, next: EffectiveLimits) {
         self.limits = next;                    // occupied deliberately untouched
-        metrics::gauge!("transcoderr_agent_slots_over_limit").set(self.over_limit());
+        metrics::gauge!("transcodarr_agent_slots_over_limit").set(self.over_limit());
     }
 }
 ```
 
-`transcoderr_agent_slots_over_limit{agent,class}` is the drain-progress gauge, so the operator sees "quiet hours started 4 minutes ago, one x265 encode still finishing" rather than wondering why the box is still audible.
+`transcodarr_agent_slots_over_limit{agent,class}` is the drain-progress gauge, so the operator sees "quiet hours started 4 minutes ago, one x265 encode still finishing" rather than wondering why the box is still audible.
 
-Apply path, end to end: parse and validate the candidate TOML → insert a `config_revision` row → `ConfigManager` swaps `ArcSwap<RuntimeConfig>` → `ScheduleEngine` recomputes → `Dispatcher` receives `DispatchEvent::ConfigApplied` via `Notify` and calls `set_limits` → the new `RuntimeConfig` (slot counts, `progress_interval_ms`, `lease_seconds`, `default_nice`) is pushed to every agent over its **existing** `Connect` stream. No agent disconnects. No stream is rebuilt. Rollback is `transcoderr admin config rollback <id>`, which replays a stored revision through the identical path.
+Apply path, end to end: parse and validate the candidate TOML → insert a `config_revision` row → `ConfigManager` swaps `ArcSwap<RuntimeConfig>` → `ScheduleEngine` recomputes → `Dispatcher` receives `DispatchEvent::ConfigApplied` via `Notify` and calls `set_limits` → the new `RuntimeConfig` (slot counts, `progress_interval_ms`, `lease_seconds`, `default_nice`) is pushed to every agent over its **existing** `Connect` stream. No agent disconnects. No stream is rebuilt. Rollback is `transcodarr admin config rollback <id>`, which replays a stored revision through the identical path.
 
 **Raising** a limit is symmetric but must wake the dispatcher — a freed-capacity event with no notification is a wedged queue. `ConfigApplied` and `ScheduleTick` are both `DispatchEvent` variants precisely so an increase produces a dispatch pass within one tick, and a 5 s unconditional safety pass (shared with `AgentHealthRestored`, B11) bounds the damage if an event is ever missed.
 
 ### Adaptive shed
 
-`StoragePressureMonitor` samples per-job throughput from `Progress` messages held in `ProgressHub`. If the p50 projected ETA for large-bucket jobs exceeds `shed_eta_threshold` (default 4 h) for 3 consecutive minutes, it decrements the effective `global.large` (floor 1) and sets `transcoderr_large_shed_active` to 1; it recovers +1 per 15 minutes of healthy ETAs. Shed refuses new acquisitions only — it never cancels (R32). This is the closed loop against the 47-job / 3–34 h measurement: even a misconfigured cap self-corrects before the pool becomes unusable.
+`StoragePressureMonitor` samples per-job throughput from `Progress` messages held in `ProgressHub`. If the p50 projected ETA for large-bucket jobs exceeds `shed_eta_threshold` (default 4 h) for 3 consecutive minutes, it decrements the effective `global.large` (floor 1) and sets `transcodarr_large_shed_active` to 1; it recovers +1 per 15 minutes of healthy ETAs. Shed refuses new acquisitions only — it never cancels (R32). This is the closed loop against the 47-job / 3–34 h measurement: even a misconfigured cap self-corrects before the pool becomes unusable.
 
 ### CPU quota
 
@@ -1834,9 +1834,9 @@ impl CpuQuotaReader {
 }
 ```
 
-`effective_cores` is re-read on **every heartbeat**, not only at registration. Tightening `CPUQuota=1200%` on U1 for thermal reasons drops the reported value to 12.0, and `agent.cpu.video_cpu = floor(12 / 12) = 1` on the next 5 s beat — the encode slot count follows the systemd quota with no operator action in transcoderr. That coupling is the entire point of R34, and it is why the derivation uses effective, never physical, cores.
+`effective_cores` is re-read on **every heartbeat**, not only at registration. Tightening `CPUQuota=1200%` on U1 for thermal reasons drops the reported value to 12.0, and `agent.cpu.video_cpu = floor(12 / 12) = 1` on the next 5 s beat — the encode slot count follows the systemd quota with no operator action in transcodarr. That coupling is the entire point of R34, and it is why the derivation uses effective, never physical, cores.
 
-Per-job soft quota is applied agent-side: `nice` (default 5 for `video_cpu`, 10 for `audio`), `ionice` where available, and `-threads ceil(effective_cores / slots)` folded into the `EncodePlan` argv. Writing a systemd drop-in from `transcoderr admin agent set-quota` requires the agent to have been started with `allow_systemd_quota = true`; by default, changing CPUQuota stays an operator action, because an agent that can rewrite its own unit file can lock you out at 3am.
+Per-job soft quota is applied agent-side: `nice` (default 5 for `video_cpu`, 10 for `audio`), `ionice` where available, and `-threads ceil(effective_cores / slots)` folded into the `EncodePlan` argv. Writing a systemd drop-in from `transcodarr admin agent set-quota` requires the agent to have been started with `allow_systemd_quota = true`; by default, changing CPUQuota stays an operator action, because an agent that can rewrite its own unit file can lock you out at 3am.
 
 ### Fairness
 
@@ -1844,7 +1844,7 @@ Ordering within a `(class, size_bucket)` partition is `(priority ASC, order_key 
 
 ### Metrics that make the caps auditable
 
-`transcoderr_agent_slots_configured{agent,class}`, `transcoderr_agent_slots_occupied{agent,class}`, `transcoderr_agent_slots_over_limit{agent,class}`, `transcoderr_global_class_limit{class}`, `transcoderr_agent_effective_cores{agent}`, `transcoderr_schedule_window_active{name}`, `transcoderr_large_shed_active`, `transcoderr_workarea_projected_bytes`, and the pair that would have caught Tdarr's 8-of-48 ceiling on day one: `transcoderr_agent_slots_idle_with_eligible_work{agent,class}` alongside `transcoderr_slots_starved{class}` and `transcoderr_dispatch_unmatched_total{reason}`. Throughput SLOs are stated in `transcoderr_bytes_reclaimed_total` and aggregate `transcoderr_encode_fps` and **never** in occupied slot count (T2) — tuning the scheduler to make slot occupancy go up is precisely how you arrive at 47 parallel jobs and 34-hour ETAs.
+`transcodarr_agent_slots_configured{agent,class}`, `transcodarr_agent_slots_occupied{agent,class}`, `transcodarr_agent_slots_over_limit{agent,class}`, `transcodarr_global_class_limit{class}`, `transcodarr_agent_effective_cores{agent}`, `transcodarr_schedule_window_active{name}`, `transcodarr_large_shed_active`, `transcodarr_workarea_projected_bytes`, and the pair that would have caught Tdarr's 8-of-48 ceiling on day one: `transcodarr_agent_slots_idle_with_eligible_work{agent,class}` alongside `transcodarr_slots_starved{class}` and `transcodarr_dispatch_unmatched_total{reason}`. Throughput SLOs are stated in `transcodarr_bytes_reclaimed_total` and aggregate `transcodarr_encode_fps` and **never** in occupied slot count (T2) — tuning the scheduler to make slot occupancy go up is precisely how you arrive at 47 parallel jobs and 34-hour ETAs.
 
 ## Observability
 
@@ -1855,7 +1855,7 @@ Three constraints, all inherited from measured failures, determine every choice 
 **Cardinality is bounded by construction.** Labels are drawn only from this closed set: `agent`, `class`, `size_bucket`, `library`, `state`, `stage`, `reason`, `gate`, `outcome`, `failure_code`, `kind`, `pool`, `mount`, `name`, `hash`, `id`, `version`, `platform`, `git_sha`, `result`. **Never** `job_id`, `file_id`, or any path. Enforce it mechanically:
 
 ```rust
-// crates/transcoderr-server/src/metrics.rs
+// crates/transcodarr-server/src/metrics.rs
 /// Every label key this process is permitted to emit.
 pub const ALLOWED_LABEL_KEYS: &[&str] = &[
     "agent", "class", "size_bucket", "library", "state", "stage", "reason",
@@ -1872,7 +1872,7 @@ A unit test iterates the registry after boot-time registration and asserts every
 
 **Progress telemetry never touches the database.** `ProgressHub` is a `DashMap<JobId, watch::Sender<ProgressSnapshot>>`, last-value-wins, plus gauge updates. Only `job_event` and `job_attempt` rows are persisted (T6). A `db_write_batch_size`/`db_write_queue_depth` pair exists specifically so a future regression toward per-progress-row writes is visible as a metric change, not discovered as a stall.
 
-**Every metric here answers a question an operator actually asked during the Tdarr engagement.** `transcoderr_agent_slots_idle_with_eligible_work` and the `slots_starved` × `unmatched{reason}` pair are the reason this section exists: Tdarr's 8-of-48 fed-worker ceiling was invisible because nothing exported the gap between configured and occupied slots while work was queued.
+**Every metric here answers a question an operator actually asked during the Tdarr engagement.** `transcodarr_agent_slots_idle_with_eligible_work` and the `slots_starved` × `unmatched{reason}` pair are the reason this section exists: Tdarr's 8-of-48 fed-worker ceiling was invisible because nothing exported the gap between configured and occupied slots while work was queued.
 
 ### Registration
 
@@ -1891,17 +1891,17 @@ Seeding matters: `dead_letter_current` must read `0`, not be absent, or `dead_le
 
 | Metric | Type | Labels | Question answered |
 |---|---|---|---|
-| `transcoderr_build_info` | gauge (=1) | `version`,`git_sha` | Which build is running? Joins to agent skew. |
-| `transcoderr_queue_depth` | gauge | `state`,`class`,`size_bucket`,`library` | Where is the backlog, and in which partition? |
-| `transcoderr_queue_oldest_age_seconds` | gauge | `class`,`size_bucket` | Is anything starving? Head-of-line age, not average. |
-| `transcoderr_dispatch_latency_seconds` | histogram | — | R65: slot-release → channel send. Buckets `.001 .005 .01 .025 .05 .1 .25 .5 1 5`. |
-| `transcoderr_dispatch_round_duration_seconds` | histogram | — | Is the dispatcher's critical section still microseconds? |
-| `transcoderr_dispatch_rounds_total` | counter | — | Is the dispatcher waking at all? |
-| `transcoderr_dispatch_last_pass_unix` | gauge | — | Wedged dispatcher: `time() - value > 30`. |
-| `transcoderr_dispatch_blocked_total` | counter | `stage` | Which `BlockStage` refuses work most. |
-| `transcoderr_dispatch_unmatched_total` | counter | `reason` | Why eligible jobs found no agent. |
-| `transcoderr_slots_starved` | gauge | `class` | Free slots coexisting with unmatched work. |
-| `transcoderr_unschedulable_work` | gauge | — | Jobs no configured agent could *ever* run. |
+| `transcodarr_build_info` | gauge (=1) | `version`,`git_sha` | Which build is running? Joins to agent skew. |
+| `transcodarr_queue_depth` | gauge | `state`,`class`,`size_bucket`,`library` | Where is the backlog, and in which partition? |
+| `transcodarr_queue_oldest_age_seconds` | gauge | `class`,`size_bucket` | Is anything starving? Head-of-line age, not average. |
+| `transcodarr_dispatch_latency_seconds` | histogram | — | R65: slot-release → channel send. Buckets `.001 .005 .01 .025 .05 .1 .25 .5 1 5`. |
+| `transcodarr_dispatch_round_duration_seconds` | histogram | — | Is the dispatcher's critical section still microseconds? |
+| `transcodarr_dispatch_rounds_total` | counter | — | Is the dispatcher waking at all? |
+| `transcodarr_dispatch_last_pass_unix` | gauge | — | Wedged dispatcher: `time() - value > 30`. |
+| `transcodarr_dispatch_blocked_total` | counter | `stage` | Which `BlockStage` refuses work most. |
+| `transcodarr_dispatch_unmatched_total` | counter | `reason` | Why eligible jobs found no agent. |
+| `transcodarr_slots_starved` | gauge | `class` | Free slots coexisting with unmatched work. |
+| `transcodarr_unschedulable_work` | gauge | — | Jobs no configured agent could *ever* run. |
 
 `stage` is exactly the `BlockStage` variants (`LibraryDisabled`, `Backoff`, `NoAgentWithCapability`, `PathTranslation`, `NoFreeSlot`, `GlobalClassLimit`, `LargeFileLimit`, `FreeSpace`, `ScheduleWindow`, `AgentPaused`, `WorkAreaCrossDevice`, `NotCommitEligible`), rendered snake_case. Emission is a single `impl` so a new variant cannot be forgotten:
 
@@ -1919,18 +1919,18 @@ The dispatcher does not touch Prometheus inside its critical section. It accumul
 
 | Metric | Type | Labels | Question answered |
 |---|---|---|---|
-| `transcoderr_agent_up` | gauge | `agent`,`platform` | Connected and accepting work. |
-| `transcoderr_agent_version_info` | gauge (=1) | `agent`,`version` | Skew vs `build_info`. |
-| `transcoderr_agent_heartbeat_age_seconds` | gauge | `agent` | Server-observed, never agent wall clock (WSL2 drift). |
-| `transcoderr_agent_slots_configured` | gauge | `agent`,`class` | Effective limit after schedule/override. |
-| `transcoderr_agent_slots_occupied` | gauge | `agent`,`class` | Slots actually held. |
-| `transcoderr_agent_slots_over_limit` | gauge | `agent`,`class` | Drain progress after a quiet-hours reduction. |
-| **`transcoderr_agent_slots_idle_with_eligible_work`** | gauge | `agent`,`class` | **The Tdarr detector.** `min(configured-occupied, eligible_in_class)`. |
-| `transcoderr_agent_effective_cores` | gauge | `agent` | Post-`CPUQuota` cores driving `video_cpu` slots. |
-| `transcoderr_agent_mount_free_bytes` | gauge | `agent`,`mount` | Per-agent view; **not** the space budget (that is pool-scoped). |
-| `transcoderr_agent_rejections_total` | counter | `agent`,`reason` | Agent refused work ⇒ capability-model bug (R23/T8). |
-| `transcoderr_agent_capability_hash_changes_total` | counter | `agent` | Driver/ffmpeg drift after a Windows Update. |
-| `transcoderr_agent_commit_eligible` | gauge | `agent` | Rename-over-open probe passed; may replace files. |
+| `transcodarr_agent_up` | gauge | `agent`,`platform` | Connected and accepting work. |
+| `transcodarr_agent_version_info` | gauge (=1) | `agent`,`version` | Skew vs `build_info`. |
+| `transcodarr_agent_heartbeat_age_seconds` | gauge | `agent` | Server-observed, never agent wall clock (WSL2 drift). |
+| `transcodarr_agent_slots_configured` | gauge | `agent`,`class` | Effective limit after schedule/override. |
+| `transcodarr_agent_slots_occupied` | gauge | `agent`,`class` | Slots actually held. |
+| `transcodarr_agent_slots_over_limit` | gauge | `agent`,`class` | Drain progress after a quiet-hours reduction. |
+| **`transcodarr_agent_slots_idle_with_eligible_work`** | gauge | `agent`,`class` | **The Tdarr detector.** `min(configured-occupied, eligible_in_class)`. |
+| `transcodarr_agent_effective_cores` | gauge | `agent` | Post-`CPUQuota` cores driving `video_cpu` slots. |
+| `transcodarr_agent_mount_free_bytes` | gauge | `agent`,`mount` | Per-agent view; **not** the space budget (that is pool-scoped). |
+| `transcodarr_agent_rejections_total` | counter | `agent`,`reason` | Agent refused work ⇒ capability-model bug (R23/T8). |
+| `transcodarr_agent_capability_hash_changes_total` | counter | `agent` | Driver/ffmpeg drift after a Windows Update. |
+| `transcodarr_agent_commit_eligible` | gauge | `agent` | Rename-over-open probe passed; may replace files. |
 
 `slots_idle_with_eligible_work` is computed in the same pass that produces `DispatchStats`, so it cannot disagree with dispatch reality. `agent_rejections_total` and `unschedulable_work` are the two series where a nonzero value is always a bug, never a workload characteristic.
 
@@ -1938,15 +1938,15 @@ The dispatcher does not touch Prometheus inside its critical section. It accumul
 
 | Metric | Type | Labels | Question answered |
 |---|---|---|---|
-| `transcoderr_jobs_total` | counter | `class`,`outcome` | Terminal outcomes (`Outcome` variants). |
-| `transcoderr_job_duration_seconds` | histogram | `class`,`size_bucket` | Buckets `60 300 900 1800 3600 7200 14400 43200 86400`. |
-| `transcoderr_encode_fps` | gauge | `agent`,`class` | Live throughput; the NVENC 71/101/117 curve, observed. |
-| `transcoderr_encode_speed_ratio` | gauge | `agent`,`class` | Speed vs realtime. |
-| `transcoderr_bytes_processed_total` | counter | `library` | Input bytes read — the I/O cost side. |
-| `transcoderr_bytes_reclaimed_total` | counter | `library`,`class` | Logical bytes saved. **Logical, not real.** |
-| `transcoderr_pool_reclaim_effective_bytes` | gauge | `pool` | Real space freed per `zfs` accounting. |
-| `transcoderr_pool_usedbysnapshots_bytes` | gauge | `pool` | Snapshots pinning replaced data. |
-| `transcoderr_snapshot_policy_ok` | gauge | `pool` | Snapshot preflight verdict. |
+| `transcodarr_jobs_total` | counter | `class`,`outcome` | Terminal outcomes (`Outcome` variants). |
+| `transcodarr_job_duration_seconds` | histogram | `class`,`size_bucket` | Buckets `60 300 900 1800 3600 7200 14400 43200 86400`. |
+| `transcodarr_encode_fps` | gauge | `agent`,`class` | Live throughput; the NVENC 71/101/117 curve, observed. |
+| `transcodarr_encode_speed_ratio` | gauge | `agent`,`class` | Speed vs realtime. |
+| `transcodarr_bytes_processed_total` | counter | `library` | Input bytes read — the I/O cost side. |
+| `transcodarr_bytes_reclaimed_total` | counter | `library`,`class` | Logical bytes saved. **Logical, not real.** |
+| `transcodarr_pool_reclaim_effective_bytes` | gauge | `pool` | Real space freed per `zfs` accounting. |
+| `transcodarr_pool_usedbysnapshots_bytes` | gauge | `pool` | Snapshots pinning replaced data. |
+| `transcodarr_snapshot_policy_ok` | gauge | `pool` | Snapshot preflight verdict. |
 
 The `bytes_reclaimed_total` / `pool_reclaim_effective_bytes` pair is deliberate and non-negotiable. On ZFS with snapshots, replacing a 60GB file in place frees nothing until the snapshots holding it expire. A single "bytes saved" number is a lie; the ratio between these two, alongside `usedbysnapshots_bytes`, is the honest answer. `PoolRepo` samples `zfs get -Hp used,usedbysnapshots,available,referenced` into `pool_reclaim_sample` every 5 minutes and the exporter reads the latest row.
 
@@ -1956,27 +1956,27 @@ T2's guard applies here: **throughput SLOs are expressed in `bytes_reclaimed_tot
 
 | Metric | Type | Labels | Question answered |
 |---|---|---|---|
-| `transcoderr_retries_total` | counter | `class`,`failure_code` | Retry volume by cause. |
-| `transcoderr_dead_letter_total` | counter | `class`,`failure_code` | Attempts exhausted. |
-| `transcoderr_dead_letter_current` | gauge | — | Awaiting operator action. |
-| `transcoderr_needs_operator_current` | gauge | — | Ambiguous commits; never auto-resolved. |
-| `transcoderr_validation_failures_total` | counter | `gate` | Which `ValidationGate` rejected output. |
-| `transcoderr_workarea_free_bytes` | gauge | `mount` | Observed free space in work areas. |
-| `transcoderr_workarea_projected_bytes` | gauge | — | Reserved bytes for in-flight outputs. |
-| `transcoderr_temp_files_current` / `_bytes_current` | gauge | — | Partial outputs on disk right now. |
-| `transcoderr_commit_intents_live` | gauge | — | Open intents across the replace window. |
-| `transcoderr_commit_intent_recovered_total` | counter | `resolution` | Crash recoveries, by how they resolved. |
-| `transcoderr_trash_bytes` / `transcoderr_trash_entries` | gauge | — | Restorable originals, and what they cost. |
-| `transcoderr_orphans_reconciled_total` | counter | `kind` | Leases, temps, intents cleaned. |
-| `transcoderr_invariant_violations_total` | counter | — | **Pages immediately.** R51 broken. |
+| `transcodarr_retries_total` | counter | `class`,`failure_code` | Retry volume by cause. |
+| `transcodarr_dead_letter_total` | counter | `class`,`failure_code` | Attempts exhausted. |
+| `transcodarr_dead_letter_current` | gauge | — | Awaiting operator action. |
+| `transcodarr_needs_operator_current` | gauge | — | Ambiguous commits; never auto-resolved. |
+| `transcodarr_validation_failures_total` | counter | `gate` | Which `ValidationGate` rejected output. |
+| `transcodarr_workarea_free_bytes` | gauge | `mount` | Observed free space in work areas. |
+| `transcodarr_workarea_projected_bytes` | gauge | — | Reserved bytes for in-flight outputs. |
+| `transcodarr_temp_files_current` / `_bytes_current` | gauge | — | Partial outputs on disk right now. |
+| `transcodarr_commit_intents_live` | gauge | — | Open intents across the replace window. |
+| `transcodarr_commit_intent_recovered_total` | counter | `resolution` | Crash recoveries, by how they resolved. |
+| `transcodarr_trash_bytes` / `transcodarr_trash_entries` | gauge | — | Restorable originals, and what they cost. |
+| `transcodarr_orphans_reconciled_total` | counter | `kind` | Leases, temps, intents cleaned. |
+| `transcodarr_invariant_violations_total` | counter | — | **Pages immediately.** R51 broken. |
 
 `validation_failures_total{gate="duration"}` and `{gate="decode_null"}` are the corruption tripwires; `{gate="size"}` is routine (a valid but non-shrinking encode) and must be excluded from corruption alerts. `failure_code` values are the `FailureCode` variants verbatim — `EncoderSessionExhausted` and `HwDecodeUnsupported` are the two whose appearance changes routing behaviour, so they are graphed separately from the transient family.
 
 ### Store, scan, policy and schedule
 
-`transcoderr_db_write_queue_depth` (gauge), `transcoderr_db_txn_duration_seconds` (histogram, buckets `.0005 .001 .005 .01 .05 .1 .5 1`), `transcoderr_db_busy_total` (counter), `transcoderr_db_fsync_latency_seconds` (gauge, from the startup and 15-minute durability probe — this, not fstype, is what proves the DB is on NVMe).
+`transcodarr_db_write_queue_depth` (gauge), `transcodarr_db_txn_duration_seconds` (histogram, buckets `.0005 .001 .005 .01 .05 .1 .5 1`), `transcodarr_db_busy_total` (counter), `transcodarr_db_fsync_latency_seconds` (gauge, from the startup and 15-minute durability probe — this, not fstype, is what proves the DB is on NVMe).
 
-`transcoderr_scan_duration_seconds{library}` (histogram), `transcoderr_scan_files_total{library,result}` where `result ∈ {seen,new,changed,missing,error}`, `transcoderr_policy_eval_duration_seconds` (histogram), `transcoderr_policy_rules_version_info{hash}` (gauge=1), `transcoderr_config_revision_info{id}` (gauge=1), `transcoderr_schedule_window_active{name}` (gauge), `transcoderr_large_shed_active` (gauge), `transcoderr_global_class_limit{class}` (gauge), `transcoderr_progress_messages_dropped_total{agent}` (counter — lossy telemetry shed, expected nonzero under load, not an error).
+`transcodarr_scan_duration_seconds{library}` (histogram), `transcodarr_scan_files_total{library,result}` where `result ∈ {seen,new,changed,missing,error}`, `transcodarr_policy_eval_duration_seconds` (histogram), `transcodarr_policy_rules_version_info{hash}` (gauge=1), `transcodarr_config_revision_info{id}` (gauge=1), `transcodarr_schedule_window_active{name}` (gauge), `transcodarr_large_shed_active` (gauge), `transcodarr_global_class_limit{class}` (gauge), `transcodarr_progress_messages_dropped_total{agent}` (counter — lossy telemetry shed, expected nonzero under load, not an error).
 
 `schedule_window_active` exists so the Grafana dashboard shades quiet hours and nobody investigates a "throughput collapse" that is just Tuesday at midnight. `rules_version_info` and `config_revision_info` make "throughput changed at 14:02" instantly correlatable with "someone applied config revision 42 at 14:01".
 
@@ -1985,7 +1985,7 @@ T2's guard applies here: **throughput SLOs are expressed in `bytes_reclaimed_tot
 R3's separation of scanning from dispatch is only real if it is measured. The acceptance test asserts:
 
 ```
-histogram_quantile(0.99, rate(transcoderr_dispatch_latency_seconds_bucket[1m])) <= 0.1
+histogram_quantile(0.99, rate(transcodarr_dispatch_latency_seconds_bucket[1m])) <= 0.1
 ```
 
 holds continuously while a synthetic 50k-file scan runs against a `FakeAgent`. This is a CI integration test, not a manual check.
@@ -2004,13 +2004,13 @@ holds continuously while a synthetic 50k-file scan runs against a `FakeAgent`. T
 async fn commit_assignment(&mut self, agent: &AgentEntry, job: Job) -> Result<(), DispatchError>;
 ```
 
-Rules: `job_id`, `file_id`, `agent_id`, `attempt`, `class`, `library` are **fields, never interpolated into the message**, so Loki queries are `{job="transcoderr"} | json | job_id="88213"`. Messages are static strings. `error` level is reserved for things requiring human action — a retryable NFS blip is `warn`. `LogRing` (bounded, default 50k lines, indexed by job and agent) mirrors the same records in memory and is tailable at `GET /api/v1/logs/tail?job_id=` over SSE, because the ring is where the logs are when Loki is also down.
+Rules: `job_id`, `file_id`, `agent_id`, `attempt`, `class`, `library` are **fields, never interpolated into the message**, so Loki queries are `{job="transcodarr"} | json | job_id="88213"`. Messages are static strings. `error` level is reserved for things requiring human action — a retryable NFS blip is `warn`. `LogRing` (bounded, default 50k lines, indexed by job and agent) mirrors the same records in memory and is tailable at `GET /api/v1/logs/tail?job_id=` over SSE, because the ring is where the logs are when Loki is also down.
 
 ### Debugging "why is this job not running"
 
 The workflow is ordered so each step is cheaper than the next, and no step requires a debugger, a browser, or reading source.
 
-**Step 1 — `transcoderr admin diagnose`** (`GET /api/v1/diagnose`). `DiagnoseReport` walks the pipeline in order and returns the first failing `DiagnoseCheck` with evidence, plus `suggested_actions`. The checks, in order: server healthy → DB fsync latency OK → agents connected → agents commit-eligible → libraries enabled → eligible work exists → schedule window permits the class → per-agent slots free → global class limit → large-file limit → pool space budget → capability match exists. This answers the global form of the question ("nothing is running") in one command over SSH.
+**Step 1 — `transcodarr admin diagnose`** (`GET /api/v1/diagnose`). `DiagnoseReport` walks the pipeline in order and returns the first failing `DiagnoseCheck` with evidence, plus `suggested_actions`. The checks, in order: server healthy → DB fsync latency OK → agents connected → agents commit-eligible → libraries enabled → eligible work exists → schedule window permits the class → per-agent slots free → global class limit → large-file limit → pool space budget → capability match exists. This answers the global form of the question ("nothing is running") in one command over SSH.
 
 **Step 2 — the queue view's inline blocking reason.** `dispatch_block` holds one upserted row per queued job recording why it did not dispatch *last round*, so `GET /api/v1/queue` returns `blocking_stage` and `detail_json` (the per-agent `UnmetRequirement` list) inline against every waiting job. This answers the per-job form ("that job specifically"). Because it is written per round and keyed by `job_id` PRIMARY KEY, it is bounded by queue size and self-cleaning.
 
@@ -2024,13 +2024,13 @@ The workflow is ordered so each step is cheaper than the next, and no step requi
 
 Seven rules, each mapped to a failure this project exists to prevent:
 
-1. `transcoderr_agent_slots_idle_with_eligible_work > 0 for 5m` — dispatch starvation (Tdarr FM1).
-2. `increase(transcoderr_agent_rejections_total[10m]) > 0` — capability-model bug (R23).
-3. `transcoderr_invariant_violations_total > 0` — page immediately (R51).
-4. `transcoderr_needs_operator_current > 0 for 15m` — ambiguous commit awaiting a human.
-5. `increase(transcoderr_validation_failures_total{gate=~"duration|decode_null|stream_counts"}[1h]) > 0` — possible corruption.
-6. `transcoderr_dispatch_last_pass_unix < time() - 30` — wedged dispatcher.
-7. `transcoderr_pool_reclaim_effective_bytes / clamp_min(increase(transcoderr_bytes_reclaimed_total[24h]),1) < 0.2 for 6h` — reclaim is theatre; snapshots are pinning everything (C6/D9).
+1. `transcodarr_agent_slots_idle_with_eligible_work > 0 for 5m` — dispatch starvation (Tdarr FM1).
+2. `increase(transcodarr_agent_rejections_total[10m]) > 0` — capability-model bug (R23).
+3. `transcodarr_invariant_violations_total > 0` — page immediately (R51).
+4. `transcodarr_needs_operator_current > 0 for 15m` — ambiguous commit awaiting a human.
+5. `increase(transcodarr_validation_failures_total{gate=~"duration|decode_null|stream_counts"}[1h]) > 0` — possible corruption.
+6. `transcodarr_dispatch_last_pass_unix < time() - 30` — wedged dispatcher.
+7. `transcodarr_pool_reclaim_effective_bytes / clamp_min(increase(transcodarr_bytes_reclaimed_total[24h]),1) < 0.2 for 6h` — reclaim is theatre; snapshots are pinning everything (C6/D9).
 
 Plus `deploy/dashboard.json`: Overview (reclaim real vs logical, slot occupancy bars, quiet-hours shading), Dispatch (latency p99, blocked-by-stage, starvation), Agents (per-codec `DecoderStatus` grid), Errors (dead letter by `failure_code`, validation by `gate`).
 
@@ -2039,7 +2039,7 @@ Plus `deploy/dashboard.json`: Overview (reclaim real vs logical, slot occupancy 
 ### Stance
 
 The UI is a **client of the public API and nothing else** (R58). Every screen is reachable
-by `curl`, which is what makes `transcoderr admin` (the `AdminCommand` enum) a thin HTTP
+by `curl`, which is what makes `transcodarr admin` (the `AdminCommand` enum) a thin HTTP
 client rather than a second implementation. There are no private endpoints, no
 server-rendered templates, and no bundler.
 
@@ -2132,7 +2132,7 @@ the CLI share one error path:
 | GET | `/healthz` `/readyz` | — | liveness; readiness gated on migrations + fsync probe |
 
 `POST /api/v1/intents/{id}/resolve` is the only human path out of `NeedsOperator`, and it
-is deliberately manual — `transcoderr_needs_operator_current` is the gauge that says a
+is deliberately manual — `transcodarr_needs_operator_current` is the gauge that says a
 human is required.
 
 ### The three endpoints that justify the UI
@@ -2154,11 +2154,11 @@ Checks, in order: `db_writable`, `db_fsync_latency`, `agents_connected`,
 `agents_commit_eligible`, `libraries_enabled`, `snapshot_policy_ok`, `eligible_work_exists`,
 `capability_match`, `path_translation`, `schedule_window`, `agent_slots`,
 `global_class_limit`, `large_file_limit`, `pool_space`, `dispatcher_liveness` (from
-`transcoderr_dispatch_last_pass_unix`). Every `BlockStage` variant maps to exactly one
+`transcodarr_dispatch_last_pass_unix`). Every `BlockStage` variant maps to exactly one
 check — an exhaustive `match` in `DiagnoseReport::build`, so a new stage cannot be added
 without a diagnostic for it.
 
-**`/files/{id}/explain`** renders `evaluate_explained` from `transcoderr-core`:
+**`/files/{id}/explain`** renders `evaluate_explained` from `transcodarr-core`:
 
 ```json
 { "facts": { "video_codec":"h264","video_bit_depth":8,"is_hdr":false,
@@ -2170,7 +2170,7 @@ without a diagnostic for it.
   "decision": {"class":"audio_then_video","reason":"rule lossless-and-opus-to-eac3"},
   "next_job": {"class":"audio","requirements":[{"agent_class":"cpu"},{"encoder":"eac3"}]},
   "argv": ["ffmpeg","-hide_banner","-y","-i","/mnt/bigdata/tv/…mkv","-map","0","-c","copy",
-           "-c:a:0","eac3","-b:a:0","640k","/mnt/bigdata/tv/.transcoderr-work/…partial.mkv"],
+           "-c:a:0","eac3","-b:a:0","640k","/mnt/bigdata/tv/.transcodarr-work/…partial.mkv"],
   "eligibility": [ {"agent":"u1","eligible":true},
                    {"agent":"win-rtx2070","eligible":false,
                     "unmet":{"kind":"agent_class","want":"cpu"}} ],
@@ -2229,7 +2229,7 @@ data: {"reason":"lagged","topics":["jobs"]}
 
 `/api/v1/logs/tail` is a separate stream off `LogRing` (bounded, default 50k lines, indexed
 by job and agent) so a firehose of log lines cannot delay progress or state events.
-`transcoderr_progress_messages_dropped_total{agent}` covers the agent→server hop;
+`transcodarr_progress_messages_dropped_total{agent}` covers the agent→server hop;
 UI-side coalescing is by design and not counted as a drop.
 
 ### Serving the UI from one binary
@@ -2251,7 +2251,7 @@ client-side routing.
 
 Nine views, each backed only by routes above:
 
-1. **Overview** — throughput, bytes reclaimed vs `transcoderr_pool_usedbysnapshots_bytes`
+1. **Overview** — throughput, bytes reclaimed vs `transcodarr_pool_usedbysnapshots_bytes`
    (so ZFS snapshots holding replaced data are visible, not implied), slots-occupied-vs-
    configured bars per agent, active `schedule_window`, and a red **"Why is nothing
    running?"** panel wired to `/diagnose` that appears whenever `throughput_ok` is false.
@@ -2273,7 +2273,7 @@ Nine views, each backed only by routes above:
    intent resolver.
 9. **Logs** — SSE tail with job/agent/level filters.
 
-The UI writes nothing the CLI cannot: `transcoderr admin diagnose|explain|queue|trash|
+The UI writes nothing the CLI cannot: `transcodarr admin diagnose|explain|queue|trash|
 config|fsck|rolling-upgrade` render the same JSON as text over SSH, which is the tool that
 still works when the browser is not an option.
 
@@ -2281,7 +2281,7 @@ still works when the browser is not an option.
 
 ### Failure taxonomy
 
-Classification is pure and lives in `transcoderr-core`, so the server, the agent, and unit tests all reach the same verdict from the same evidence:
+Classification is pure and lives in `transcodarr-core`, so the server, the agent, and unit tests all reach the same verdict from the same evidence:
 
 ```rust
 /// Classify a finished ffmpeg attempt. Ordered pattern table; first match wins.
@@ -2320,7 +2320,7 @@ At `attempt >= max_attempts` (default 3, per-class configurable) the job moves t
 
 Agent-level circuit breaker: `Dispatcher` counts consecutive failed jobs per agent with zero interleaved successes. At `quarantine_threshold` (default 8) the agent transitions to `AgentStatus::Quarantined` with `quarantine_reason`, stops receiving work, and alarms. Without this, one agent whose ffmpeg was replaced by a broken build silently eats the entire queue three attempts at a time.
 
-Metrics: `transcoderr_retries_total{class,failure_code}`, `transcoderr_dead_letter_total{class,failure_code}`, `transcoderr_dead_letter_current`, `transcoderr_agent_rejections_total{agent,reason}`, `transcoderr_needs_operator_current`.
+Metrics: `transcodarr_retries_total{class,failure_code}`, `transcodarr_dead_letter_total{class,failure_code}`, `transcodarr_dead_letter_current`, `transcodarr_agent_rejections_total{agent,reason}`, `transcodarr_needs_operator_current`.
 
 ### The validation gate
 
@@ -2347,7 +2347,7 @@ pub fn validate_output(
    - `JobClass::VideoGpu` / `VideoCpu`: `output_bytes <= source_bytes * max_output_size_ratio` (default 1.0) and `source_bytes - output_bytes >= min_shrink_bytes`.
    - `JobClass::Audio`: compares **audio-stream bytes only** (summed from `file_stream.bit_rate_bps * duration`, or `-show_packets` sizes when available) with `may_grow = true`. A TrueHD→EAC3 pass on a file whose video dominates will barely move total size, and a file-level shrink threshold would reject a correct audio conversion and strand the follow-up video job forever.
 
-Failing gates 1–6 deletes the temp and fails the job as `FailedValidation` with `transcoderr_validation_failures_total{gate}` incremented. Failing only gate 7 is `Outcome::SucceededKeptOriginal`: temp deleted, original untouched, and a `file_skip_marker(file_id, decision_class, rules_version, 'no_gain')` row written so the same policy never retries that decision class — per-class, not per-file, so a no-gain video result does not suppress future audio work.
+Failing gates 1–6 deletes the temp and fails the job as `FailedValidation` with `transcodarr_validation_failures_total{gate}` incremented. Failing only gate 7 is `Outcome::SucceededKeptOriginal`: temp deleted, original untouched, and a `file_skip_marker(file_id, decision_class, rules_version, 'no_gain')` row written so the same policy never retries that decision class — per-class, not per-file, so a no-gain video result does not suppress future audio work.
 
 ### Commit intent ledger
 
@@ -2422,17 +2422,17 @@ The reaper (`TrashRepo`) is the only code permitted to unlink a trash entry, and
 | Agent never returns | Server intent `live`, lease expired | `Reconciler` enqueues a `JobClass::Verify` job on any agent covering the path; probe decides `rolled_forward` vs `rolled_back` | Trash link is the backstop |
 | `final` missing **and** trash missing | Contradicts the ritual; external actor | Resolve `escalated`, job → `NeedsOperator`, page | Never auto-resolved |
 
-**Invariant I1** (asserted continuously by `ConsistencyChecker` and on demand by `transcoderr admin fsck`): for every file, at every instant, at least one of `final_path` or `trash_path` holds a complete file, because the only overwrite of `final_path` (S4) happens strictly after the trash link is durable (S3), and the only unlink of the trash link happens strictly after the intent resolved `rolled_forward`. Violations increment `transcoderr_invariant_violations_total` and page.
+**Invariant I1** (asserted continuously by `ConsistencyChecker` and on demand by `transcodarr admin fsck`): for every file, at every instant, at least one of `final_path` or `trash_path` holds a complete file, because the only overwrite of `final_path` (S4) happens strictly after the trash link is durable (S3), and the only unlink of the trash link happens strictly after the intent resolved `rolled_forward`. Violations increment `transcodarr_invariant_violations_total` and page.
 
-Recovery metrics: `transcoderr_commit_intents_live`, `transcoderr_commit_intent_recovered_total{resolution}`, `transcoderr_orphans_reconciled_total{kind}`, `transcoderr_temp_files_current`, `transcoderr_temp_bytes_current`, `transcoderr_trash_bytes`, `transcoderr_trash_entries`.
+Recovery metrics: `transcodarr_commit_intents_live`, `transcodarr_commit_intent_recovered_total{resolution}`, `transcodarr_orphans_reconciled_total{kind}`, `transcodarr_temp_files_current`, `transcodarr_temp_bytes_current`, `transcodarr_trash_bytes`, `transcodarr_trash_entries`.
 
-Finally, ZFS honesty: because the pool snapshots, a successful replace reclaims nothing until the last snapshot referencing the old blocks expires. `transcoderr_bytes_reclaimed_total` is logical accounting; `transcoderr_pool_reclaim_effective_bytes` and `transcoderr_pool_usedbysnapshots_bytes` come from `zfs get used,usedbysnapshots,available` sampled into `pool_reclaim_sample`, and a snapshot-policy preflight (`transcoderr_snapshot_policy_ok{pool}`) must pass before a library is commit-eligible.
+Finally, ZFS honesty: because the pool snapshots, a successful replace reclaims nothing until the last snapshot referencing the old blocks expires. `transcodarr_bytes_reclaimed_total` is logical accounting; `transcodarr_pool_reclaim_effective_bytes` and `transcodarr_pool_usedbysnapshots_bytes` come from `zfs get used,usedbysnapshots,available` sampled into `pool_reclaim_sample`, and a snapshot-policy preflight (`transcodarr_snapshot_policy_ok{pool}`) must pass before a library is commit-eligible.
 
 ## Security
 
 ### Trust model
 
-The deployment is three hosts on one home LAN: `U0` (server, `172.16.2.30`), `U1` (`172.16.2.35`), and `windows-rtx2070` (`172.16.3.22`, agent inside WSL2). There is no multi-tenancy, no untrusted user, and no internet exposure. Anyone who can already log into `U0` can `rm -rf /mnt/bigdata` without transcoderr's help, so the system does not attempt to defend against a compromised server host.
+The deployment is three hosts on one home LAN: `U0` (server, `172.16.2.30`), `U1` (`172.16.2.35`), and `windows-rtx2070` (`172.16.3.22`, agent inside WSL2). There is no multi-tenancy, no untrusted user, and no internet exposure. Anyone who can already log into `U0` can `rm -rf /mnt/bigdata` without transcodarr's help, so the system does not attempt to defend against a compromised server host.
 
 What it *does* defend against, in priority order:
 
@@ -2450,17 +2450,17 @@ Two modes, chosen by `security.agent_auth` in the server config. Both run over T
 ```toml
 [security]
 agent_auth       = "mtls"            # "mtls" | "token"
-ca_cert          = "/var/lib/transcoderr/pki/ca.crt"
-server_cert      = "/var/lib/transcoderr/pki/server.crt"
-server_key       = "/var/lib/transcoderr/pki/server.key"   # mode 0600
-token_file       = "/etc/transcoderr/agent.token"          # mode 0600, token mode only
+ca_cert          = "/var/lib/transcodarr/pki/ca.crt"
+server_cert      = "/var/lib/transcodarr/pki/server.crt"
+server_key       = "/var/lib/transcodarr/pki/server.key"   # mode 0600
+token_file       = "/etc/transcodarr/agent.token"          # mode 0600, token mode only
 min_agent_version = "0.3.0"
 api_bind         = "127.0.0.1:9797"
 api_auth         = "token"           # "token" | "none"
-api_token_file   = "/etc/transcoderr/api.token"
+api_token_file   = "/etc/transcodarr/api.token"
 ```
 
-`transcoderr admin ca init` generates a 10-year self-signed CA; `transcoderr admin ca issue --agent u1 --san 172.16.2.35 --san u1.lan` issues a 5-year leaf whose **Common Name must equal the `agent_id`**. Long validity is deliberate: the WSL2 guest's clock jumps across Windows sleep/resume, and a short-lived cert plus skew produces `certificate not yet valid` errors that look like a network fault. For the same reason `NotBefore` is backdated 24 hours at issue time.
+`transcodarr admin ca init` generates a 10-year self-signed CA; `transcodarr admin ca issue --agent u1 --san 172.16.2.35 --san u1.lan` issues a 5-year leaf whose **Common Name must equal the `agent_id`**. Long validity is deliberate: the WSL2 guest's clock jumps across Windows sleep/resume, and a short-lived cert plus skew produces `certificate not yet valid` errors that look like a network fault. For the same reason `NotBefore` is backdated 24 hours at issue time.
 
 `Register` is the only authorisation decision point. It runs before any capability is recorded:
 
@@ -2513,9 +2513,9 @@ pub fn guard_within_roots(
 ) -> Result<(), PathError>;
 ```
 
-Failure is `JobRejected{unmet_requirement:"path_outside_roots"}` before any process is spawned, and — per the T8 resolution — it increments `transcoderr_agent_rejections_total{agent,reason="path_outside_roots"}` and is alarmed as a **server bug**, because the server's `Requirement::MountCovers` matching should have made it impossible (R62).
+Failure is `JobRejected{unmet_requirement:"path_outside_roots"}` before any process is spawned, and — per the T8 resolution — it increments `transcodarr_agent_rejections_total{agent,reason="path_outside_roots"}` and is alarmed as a **server bug**, because the server's `Requirement::MountCovers` matching should have made it impossible (R62).
 
-**A single destructive module.** Only `transcoderr-agent`'s commit path may call `rename`, `remove_file`, or `remove_dir_all` on a media path, and only holding a token that cannot be forged:
+**A single destructive module.** Only `transcodarr-agent`'s commit path may call `rename`, `remove_file`, or `remove_dir_all` on a media path, and only holding a token that cannot be forged:
 
 ```rust
 /// Constructible only from a live `commit_intent` row acknowledged by the
@@ -2538,11 +2538,11 @@ The API is the whole system's control surface: it can apply a policy that enqueu
 
 Defaults, in order of importance:
 
-- **`api_bind = "127.0.0.1:9797"`.** Out of the box the API is loopback-only; remote access is an SSH tunnel or a reverse proxy the owner deliberately configures. `transcoderr admin` speaks to the same API over the tunnel, which is the 3am path anyway.
+- **`api_bind = "127.0.0.1:9797"`.** Out of the box the API is loopback-only; remote access is an SSH tunnel or a reverse proxy the owner deliberately configures. `transcodarr admin` speaks to the same API over the tunnel, which is the 3am path anyway.
 - **`api_auth = "token"`** with a token in the `Authorization: Bearer` header — **never a cookie**. This is the CSRF and DNS-rebinding defence: a cross-origin form post or `fetch` from a malicious page cannot attach a header it does not know, and there is no ambient credential for the browser to send automatically. The UI stores the token in `sessionStorage` and sets the header from its ES module. No cookies exist anywhere in the design.
 - **Host header allowlist.** Requests whose `Host` is neither a configured hostname nor a literal IP the server binds are rejected with 421. This closes DNS rebinding even in `api_auth = "none"` mode.
-- **`api_auth = "none"` is permitted but noisy.** Setting it while `api_bind` is not a loopback address logs a startup `WARN`, adds a persistent banner to the Overview view, and sets a gauge. *(New metric, following the existing convention: `transcoderr_api_unauthenticated{bind}` gauge, 1 when a non-loopback bind has auth disabled.)* Making the insecure choice visible is more useful here than forbidding it.
-- Auth failures are counted, not just logged. *(New metric: `transcoderr_auth_failures_total{surface,reason}`, where `surface` is `agent_register`, `agent_stream`, or `api`, and `reason` is `bad_token`, `cn_mismatch`, `proto_too_old`, `duplicate_identity`, `host_rejected`.)* An alert at `rate > 0 for 10m` catches a stale token on an agent after a credential rotation, which otherwise presents as "the GPU node just stopped taking work" and sends the operator down the capability-drift rabbit hole.
+- **`api_auth = "none"` is permitted but noisy.** Setting it while `api_bind` is not a loopback address logs a startup `WARN`, adds a persistent banner to the Overview view, and sets a gauge. *(New metric, following the existing convention: `transcodarr_api_unauthenticated{bind}` gauge, 1 when a non-loopback bind has auth disabled.)* Making the insecure choice visible is more useful here than forbidding it.
+- Auth failures are counted, not just logged. *(New metric: `transcodarr_auth_failures_total{surface,reason}`, where `surface` is `agent_register`, `agent_stream`, or `api`, and `reason` is `bad_token`, `cn_mismatch`, `proto_too_old`, `duplicate_identity`, `host_rejected`.)* An alert at `rate > 0 for 10m` catches a stale token on an agent after a credential rotation, which otherwise presents as "the GPU node just stopped taking work" and sends the operator down the capability-drift rabbit hole.
 
 Two API-specific hardening points that are not about attackers:
 
@@ -2565,22 +2565,22 @@ Every phase ends with a demonstrable artifact and a named acceptance test. No ph
 
 ### Phase 0 — Environment preflight (no orchestrator code)
 
-**Ships.** A `transcoderr admin diagnose --preflight` subcommand (`AdminCommand::Diagnose`) that runs four probes and prints a pass/fail table. Implemented as `Preflight` in `transcoderr-agent` (new name; obvious fit alongside `RenameProbe`).
+**Ships.** A `transcodarr admin diagnose --preflight` subcommand (`AdminCommand::Diagnose`) that runs four probes and prints a pass/fail table. Implemented as `Preflight` in `transcodarr-agent` (new name; obvious fit alongside `RenameProbe`).
 
 - `RenameProbe` — creates a destination, **holds it open**, renames a second file over it, and verifies the destination inode is the new file's. Run against `/mnt/bigdata` from U0, from U1, and from inside WSL2 on `windows-rtx2070`. Sets `agent.rename_probe_status` / `agent.commit_eligible`.
-- DB fsync latency probe — 1000 fsyncs on the candidate DB path, reports p99 as `transcoderr_db_fsync_latency_seconds`. Hard abort above threshold. Filesystem type is *not* the gate; measured latency is (every path here is ZFS).
+- DB fsync latency probe — 1000 fsyncs on the candidate DB path, reports p99 as `transcodarr_db_fsync_latency_seconds`. Hard abort above threshold. Filesystem type is *not* the gate; measured latency is (every path here is ZFS).
 - ZFS snapshot preflight — reads `zfs list -o used,usedbysnapshots,available,referenced` for each dataset, writes `storage_pool.snapshot_policy_ok` and a first `pool_reclaim_sample` row. If snapshots retain replaced data, `bytes_reclaimed` is a lie and the operator must know before the first commit.
 - `CpuQuotaReader` — resolves effective cores from cgroup v2, including the delegated `system.slice/<unit>/cpu.max` path, tolerating absence.
 
 **Deferred.** Everything else.
 
-**Milestone.** `transcoderr admin diagnose --preflight` passes on U0 and U1. **If the WSL2 node fails `RenameProbe`, the architecture changes here, not later**: the GPU agent becomes produce-only and a U0-local agent performs commits. Discovering that after the dispatcher exists costs weeks.
+**Milestone.** `transcodarr admin diagnose --preflight` passes on U0 and U1. **If the WSL2 node fails `RenameProbe`, the architecture changes here, not later**: the GPU agent becomes produce-only and a U0-local agent performs commits. Discovering that after the dispatcher exists costs weeks.
 
 ---
 
-### Phase 1 — Workspace split and `transcoderr-core`
+### Phase 1 — Workspace split and `transcodarr-core`
 
-**Ships.** Cargo workspace; the existing 508-line `src/main.rs` moves to `crates/transcoderr-cli/src/main.rs` with the two real bugs fixed first (dry-run creating directories; unknown presets silently ignored). `transcoderr-core` with no tokio, no rusqlite, no tonic:
+**Ships.** Cargo workspace; the existing 508-line `src/main.rs` moves to `crates/transcodarr-cli/src/main.rs` with the two real bugs fixed first (dry-run creating directories; unknown presets silently ignored). `transcodarr-core` with no tokio, no rusqlite, no tonic:
 
 ```rust
 pub fn parse_ffprobe_json(s: &str) -> Result<MediaProbe, CoreError>;
@@ -2604,13 +2604,13 @@ pub fn size_bucket_for(bytes: u64, t: &SizeThresholds) -> SizeBucket;
 
 **Deferred.** All I/O, all networking, the DB.
 
-**Milestone.** The full R70 fixture set passes with **zero** media files, zero network, zero DB: multi-track audio+subtitle mapping, 10-bit preserved, 8-bit not upconverted, HDR/DV vetoed for video but audio still planned, DV profile 7 and object-audio excluded, Hi10 soft-fallback rejected, AV1 hard-fail rejected, and a synthetic truncated-output probe that fails `ValidationGate::Duration` **before** `ValidationGate::Size` is ever consulted. Plus a property test: `evaluate` is deterministic for a fixed `(FileFacts, RulesVersion)`. All 16 legacy integration tests still pass against `transcoderr local`.
+**Milestone.** The full R70 fixture set passes with **zero** media files, zero network, zero DB: multi-track audio+subtitle mapping, 10-bit preserved, 8-bit not upconverted, HDR/DV vetoed for video but audio still planned, DV profile 7 and object-audio excluded, Hi10 soft-fallback rejected, AV1 hard-fail rejected, and a synthetic truncated-output probe that fails `ValidationGate::Duration` **before** `ValidationGate::Size` is ever consulted. Plus a property test: `evaluate` is deterministic for a fixed `(FileFacts, RulesVersion)`. All 16 legacy integration tests still pass against `transcodarr local`.
 
 ---
 
-### Phase 2 — `transcoderr-store`, scanner, evaluator
+### Phase 2 — `transcodarr-store`, scanner, evaluator
 
-**Ships.** Full schema as embedded migrations verified through `schema_migration`; `Db` pragma validation; `Writer` with `WriteLane` priority lanes and per-op `SAVEPOINT` isolation plus poison quarantine; `ReadPool`; all repositories (`FileRepo`, `JobRepo`, `AgentRepo`, `LibraryRepo`, `ConfigRepo`, `ScheduleRepo`, `TrashRepo`, `CommitIntentRepo`, `DispatchBlockRepo`, `PoolRepo`). `Scanner` (discovery only, idempotent upsert keyed on `path_hash`, identity `(dev, inode)`, default exclusions `.zfs`/`work`/`trash`/`@eaDir`/`lost+found`, mass-missing abort guard, `min_mtime_age_s`). Probe ingestion for new/changed files under its own bounded concurrency. `Evaluator` in batches of 1000 over `idx_file_needs_eval`. `transcoderr admin explain <path>` and `transcoderr admin config validate --diff`.
+**Ships.** Full schema as embedded migrations verified through `schema_migration`; `Db` pragma validation; `Writer` with `WriteLane` priority lanes and per-op `SAVEPOINT` isolation plus poison quarantine; `ReadPool`; all repositories (`FileRepo`, `JobRepo`, `AgentRepo`, `LibraryRepo`, `ConfigRepo`, `ScheduleRepo`, `TrashRepo`, `CommitIntentRepo`, `DispatchBlockRepo`, `PoolRepo`). `Scanner` (discovery only, idempotent upsert keyed on `path_hash`, identity `(dev, inode)`, default exclusions `.zfs`/`work`/`trash`/`@eaDir`/`lost+found`, mass-missing abort guard, `min_mtime_age_s`). Probe ingestion for new/changed files under its own bounded concurrency. `Evaluator` in batches of 1000 over `idx_file_needs_eval`. `transcodarr admin explain <path>` and `transcodarr admin config validate --diff`.
 
 **Deferred.** Jobs are *created* but never dispatched; no agents, no proto, no UI.
 
@@ -2621,27 +2621,27 @@ SELECT decision, COUNT(*), SUM(size_bytes)/1024/1024/1024 AS gib
 FROM file WHERE library_id = ? GROUP BY decision;
 ```
 
-returns in under a second, and a policy edit followed by `UPDATE file SET eval_rules_version = NULL WHERE library_id IN (...)` re-derives all 49.6k decisions from stored `probe_json` in **seconds with zero filesystem I/O** (`transcoderr_policy_eval_duration_seconds`). This phase is independently valuable: it already answers "what needs transcoding across 85 TB", which Tdarr never did.
+returns in under a second, and a policy edit followed by `UPDATE file SET eval_rules_version = NULL WHERE library_id IN (...)` re-derives all 49.6k decisions from stored `probe_json` in **seconds with zero filesystem I/O** (`transcodarr_policy_eval_duration_seconds`). This phase is independently valuable: it already answers "what needs transcoding across 85 TB", which Tdarr never did.
 
 ---
 
 ### Phase 3 — Single-node executor and the commit ritual (risk retirement)
 
-**Ships.** `transcoderr-agent` running **in-process** under `transcoderr local run --library tv --limit N`, with no server and no gRPC: `Executor` (argv, no shell), `FfmpegProcess`, `ProgressTailer` (progress *file*, not pipe), `OutputValidator` running the ordered gates, `AtomicReplacer`, `CommitRitual`, `IntentJournal` with `IntentPhase::{Granted, Retired, Installed}` fsynced before each step, `WorkArea` namespaced by `agent_uid` + `boot_id`, `TrashCan`. Server-side `commit_intent` rows via `CommitIntentRepo` with the partial unique index on live intents. Cross-device work area is a hard refusal.
+**Ships.** `transcodarr-agent` running **in-process** under `transcodarr local run --library tv --limit N`, with no server and no gRPC: `Executor` (argv, no shell), `FfmpegProcess`, `ProgressTailer` (progress *file*, not pipe), `OutputValidator` running the ordered gates, `AtomicReplacer`, `CommitRitual`, `IntentJournal` with `IntentPhase::{Granted, Retired, Installed}` fsynced before each step, `WorkArea` namespaced by `agent_uid` + `boot_id`, `TrashCan`. Server-side `commit_intent` rows via `CommitIntentRepo` with the partial unique index on live intents. Cross-device work area is a hard refusal.
 
 **Deferred.** Dispatch, capability probing, GPU, metrics endpoint, UI.
 
-**Milestone.** Two proofs. (1) A crash matrix: a fault-injecting harness kills the process at each of the nine ritual steps; replaying `IntentJournal` plus `commit_intent` always resolves to source-intact or replacement-installed, never neither, and ambiguity resolves to `JobState::NeedsOperator` rather than a guess. `transcoderr_commit_intent_recovered_total{resolution}` covers every arm. (2) 200 real files transcoded end-to-end on U1 with byte-exact track preservation verified by diffing input and output `file_stream` rows.
+**Milestone.** Two proofs. (1) A crash matrix: a fault-injecting harness kills the process at each of the nine ritual steps; replaying `IntentJournal` plus `commit_intent` always resolves to source-intact or replacement-installed, never neither, and ambiguity resolves to `JobState::NeedsOperator` rather than a guess. `transcodarr_commit_intent_recovered_total{resolution}` covers every arm. (2) 200 real files transcoded end-to-end on U1 with byte-exact track preservation verified by diffing input and output `file_stream` rows.
 
 ---
 
 ### Phase 4 — Protocol, one agent, dispatcher (audio class only)
 
-**Ships.** `transcoderr-proto` (`Register` + `Connect`), `AgentSession`, `ConnectClient` with `ReconnectPolicy`, `FencingEpoch` bumped only on new process instance. `Dispatcher` owning `CapacityLedger`, `AgentTable`, `ReadyIndex`, `ReadyQueue` partitioned by `(class, size_bucket)`, `BucketKey`/`EligibilityBitset`, `AdmissionCheck`, `SkipCursor`, `dispatch_block` rows. `AcquiredPermits` acquired all-or-nothing; released on leaving the admitted state set; ledger rebuilt from `Assigned`/`Running`/`Verifying`/`Committing` rows before the first dispatch pass. `Reconciler` on a 5s tick. Only `JobClass::Audio` on U1.
+**Ships.** `transcodarr-proto` (`Register` + `Connect`), `AgentSession`, `ConnectClient` with `ReconnectPolicy`, `FencingEpoch` bumped only on new process instance. `Dispatcher` owning `CapacityLedger`, `AgentTable`, `ReadyIndex`, `ReadyQueue` partitioned by `(class, size_bucket)`, `BucketKey`/`EligibilityBitset`, `AdmissionCheck`, `SkipCursor`, `dispatch_block` rows. `AcquiredPermits` acquired all-or-nothing; released on leaving the admitted state set; ledger rebuilt from `Assigned`/`Running`/`Verifying`/`Committing` rows before the first dispatch pass. `Reconciler` on a 5s tick. Only `JobClass::Audio` on U1.
 
 **Deferred.** GPU, trial decodes, schedules, UI.
 
-**Milestone.** The DI-1 maximal-matching invariant is a CI-checked artifact: a table enumerating every `DispatchEvent` against every conjunct of "a free slot coexists with unmatched eligible work", with a test per cell. Then a `FakeAgent` load test — 50k synthetic files, a full library scan running concurrently — asserts `transcoderr_dispatch_latency_seconds` p99 ≤ 100 ms (R65/R66) and `transcoderr_agent_slots_idle_with_eligible_work` stays 0. Real proof: 24 concurrent audio jobs sustained on U1.
+**Milestone.** The DI-1 maximal-matching invariant is a CI-checked artifact: a table enumerating every `DispatchEvent` against every conjunct of "a free slot coexists with unmatched eligible work", with a test per cell. Then a `FakeAgent` load test — 50k synthetic files, a full library scan running concurrently — asserts `transcodarr_dispatch_latency_seconds` p99 ≤ 100 ms (R65/R66) and `transcodarr_agent_slots_idle_with_eligible_work` stays 0. Real proof: 24 concurrent audio jobs sustained on U1.
 
 ---
 
@@ -2651,7 +2651,7 @@ returns in under a second, and a policy edit followed by `UPDATE file SET eval_r
 
 **Deferred.** Schedules, UI, adaptive shed.
 
-**Milestone.** The Turing matrix, verified live: AV1 and Hi10 H.264 files are **never dispatched** to `windows-rtx2070` with an NVDEC requirement; `transcoderr_agent_rejections_total` stays 0 across a 500-file run. A TrueHD 10-bit HEVC file runs audio-on-U1 then video-on-GPU with no phase column anywhere in the schema, and finishes at exactly one job per stage (`idx_job_open_per_file` proves no double-dispatch).
+**Milestone.** The Turing matrix, verified live: AV1 and Hi10 H.264 files are **never dispatched** to `windows-rtx2070` with an NVDEC requirement; `transcodarr_agent_rejections_total` stays 0 across a 500-file run. A TrueHD 10-bit HEVC file runs audio-on-U1 then video-on-GPU with no phase column anywhere in the schema, and finishes at exactly one job per stage (`idx_job_open_per_file` proves no double-dispatch).
 
 ---
 
@@ -2659,13 +2659,13 @@ returns in under a second, and a policy edit followed by `UPDATE file SET eval_r
 
 **Ships.** Every metric in the naming contract; `deploy/grafana-dashboard.json` and `deploy/alerts.yml` (starvation, rejections, dead-letter, duration-gate failures, workarea free, heartbeat age, invariant violations). `ScheduleEngine`, `EffectiveLimits`, `schedule_window`, `schedule_override` with mandatory expiry, `StoragePressureMonitor`. `ProgressHub` (watch, lossy) and `LogRing`. `ApiServer` with the full `/api/v1`, SSE, `/files/{id}/explain`, `/diagnose`. `rust-embed` UI, `debug-embed = false`.
 
-**Milestone.** Unplug the GPU node mid-run; `/api/v1/diagnose` returns the correct first blocking stage with evidence and a suggested action, and `transcoderr admin diagnose` renders it over SSH with no browser.
+**Milestone.** Unplug the GPU node mid-run; `/api/v1/diagnose` returns the correct first blocking stage with evidence and a suggested action, and `transcodarr admin diagnose` renders it over SSH with no browser.
 
 ---
 
 ### Phase 7 — Hardening
 
-**Ships.** `ConsistencyChecker` and `transcoderr admin fsck` asserting R51 continuously; trash retention reaping against pool pressure with a `min_grace` floor; `Drainer`, `POST /agents/{id}/drain`, `transcoderr admin rolling-upgrade --all`; `min_agent_version` at `Register`; agent circuit breaker (N consecutive failures, zero successes → `AgentStatus::Quarantined`); nightly `VACUUM INTO`; `config_revision` rollback.
+**Ships.** `ConsistencyChecker` and `transcodarr admin fsck` asserting R51 continuously; trash retention reaping against pool pressure with a `min_grace` floor; `Drainer`, `POST /agents/{id}/drain`, `transcodarr admin rolling-upgrade --all`; `min_agent_version` at `Register`; agent circuit breaker (N consecutive failures, zero successes → `AgentStatus::Quarantined`); nightly `VACUUM INTO`; `config_revision` rollback.
 
 **Milestone.** A rolling upgrade of both agents under full load with zero job losses and zero temp files left behind.
 
@@ -2675,7 +2675,7 @@ returns in under a second, and a policy edit followed by `UPDATE file SET eval_r
 
 Four gates, in order, each reversible.
 
-1. **Shadow week.** `safety.dry_commit = true` (new config key). The full pipeline runs — dispatch, encode, validate — and then **deletes the temp instead of renaming**. Tdarr keeps running. Compare transcoderr's `file.decision` column against Tdarr's queue; investigate every disagreement. Watch `transcoderr_bytes_reclaimed_total` divided by job-hours: if it is near zero, the CQ/CRF targets are miscalibrated and thousands of files would be burned for nothing.
+1. **Shadow week.** `safety.dry_commit = true` (new config key). The full pipeline runs — dispatch, encode, validate — and then **deletes the temp instead of renaming**. Tdarr keeps running. Compare transcodarr's `file.decision` column against Tdarr's queue; investigate every disagreement. Watch `transcodarr_bytes_reclaimed_total` divided by job-hours: if it is near zero, the CQ/CRF targets are miscalibrated and thousands of files would be burned for nothing.
 2. **One library, audio only.** `cutover.libraries = ["anime"]`, video classes at 0 slots. Anime is the smallest by bytes. Take a ZFS snapshot first. Audio work is cheap, fast, and fully reversible from `trash_entry`.
 3. **Video on one library.** Raise `global.video_gpu` to 3, `global.large` to 3. Tdarr's libraries have **Process Library turned OFF** — not merely the transcode toggle — so it cannot dispatch against the same files.
 4. **All libraries.** Tdarr stopped, not uninstalled, for 30 days.
@@ -2684,7 +2684,7 @@ Four gates, in order, each reversible.
 
 Four independent levers, coarsest last:
 
-- **Per-file.** `transcoderr admin trash restore <file_id>` — the original is a rename away, retained for `retention_days`. This is the honest answer to "no silent data loss"; no validator confidence substitutes for it.
-- **Per-policy.** `transcoderr admin config rollback <revision_id>` restores the exact prior TOML from `config_revision`, recomputes `rules_version`, and re-evaluates. Never apply a policy without `?diff=true` first: the diff reports `{"none->video": N}` and the terabytes implied.
-- **Per-run.** `zfs rollback bigdata/media@pre-transcoderr-<date>`. Snapshots are taken before gates 2, 3 and 4 and are the only backstop for the corruption class the validator cannot model (chroma shift, A/V drift, mangled subtitle timings).
-- **Whole system.** Stop the transcoderr units, re-enable Process Library in Tdarr. Nothing transcoderr writes is proprietary: outputs are ordinary MKV files, and the SQLite DB is disposable — a rescan rebuilds it. There is no lock-in to unwind, which is the point.
+- **Per-file.** `transcodarr admin trash restore <file_id>` — the original is a rename away, retained for `retention_days`. This is the honest answer to "no silent data loss"; no validator confidence substitutes for it.
+- **Per-policy.** `transcodarr admin config rollback <revision_id>` restores the exact prior TOML from `config_revision`, recomputes `rules_version`, and re-evaluates. Never apply a policy without `?diff=true` first: the diff reports `{"none->video": N}` and the terabytes implied.
+- **Per-run.** `zfs rollback bigdata/media@pre-transcodarr-<date>`. Snapshots are taken before gates 2, 3 and 4 and are the only backstop for the corruption class the validator cannot model (chroma shift, A/V drift, mangled subtitle timings).
+- **Whole system.** Stop the transcodarr units, re-enable Process Library in Tdarr. Nothing transcodarr writes is proprietary: outputs are ordinary MKV files, and the SQLite DB is disposable — a rescan rebuilds it. There is no lock-in to unwind, which is the point.
