@@ -15,6 +15,8 @@
 pub mod paths;
 pub mod plan;
 pub mod preset;
+pub mod probe;
+pub mod validate;
 
 use thiserror::Error;
 
@@ -37,4 +39,11 @@ pub enum CoreError {
     /// A path could not be interpreted (no filename, non-UTF-8, and similar).
     #[error("invalid path: {0}")]
     InvalidPath(String),
+
+    /// ffprobe output was not parseable JSON.
+    ///
+    /// Missing *fields* are not an error — ffprobe legitimately omits
+    /// `duration` on some containers and `bits_per_raw_sample` on most.
+    #[error("malformed ffprobe output: {0}")]
+    MalformedProbe(String),
 }
