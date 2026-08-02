@@ -1,0 +1,25 @@
+# file: crates/transcodarr-agent/Cargo.toml
+# version: 1.0.0
+# guid: e6b09d41-7a52-4c38-91fe-04d7b3a86152
+# last-edited: 2026-08-02
+
+[package]
+name = "transcodarr-agent"
+version = "0.1.0"
+description = "transcodarr worker agent: environment preflight, capability probing, ffmpeg execution, commit ritual."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Depends on core only. Never on transcodarr-store: an agent must be copyable to
+# the Windows node without dragging SQLite along.
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+transcodarr-core = { path = "../transcodarr-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

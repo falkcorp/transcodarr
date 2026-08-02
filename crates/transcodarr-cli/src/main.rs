@@ -9,6 +9,7 @@
 //! grouping is introduced now so the surface is stable before the orchestrator
 //! lands behind it.
 
+mod admin;
 mod local;
 
 use anyhow::Result;
@@ -40,6 +41,10 @@ enum Commands {
     /// which is exactly when you least want it to depend on the orchestrator.
     #[command(subcommand)]
     Local(local::LocalCommand),
+
+    /// Operator diagnostics and maintenance.
+    #[command(subcommand)]
+    Admin(admin::AdminCommand),
 }
 
 /// Verbs that sat at the top level before the `local` grouping existed.
@@ -64,6 +69,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse_from(rewrite_legacy_verbs(std::env::args().collect()));
     match cli.command {
         Commands::Local(cmd) => local::run(cmd),
+        Commands::Admin(cmd) => admin::run(cmd),
     }
 }
 
