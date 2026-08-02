@@ -12,6 +12,8 @@
 //! server and the agent link the *same* matching and validation code rather
 //! than maintaining two implementations that can drift apart.
 
+pub mod capability;
+pub mod failure;
 pub mod paths;
 pub mod plan;
 pub mod preset;
