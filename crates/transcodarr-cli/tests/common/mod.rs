@@ -14,9 +14,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Get the path to the project root directory
+/// Get the path to the workspace root directory.
+///
+/// `CARGO_MANIFEST_DIR` now points at `crates/transcodarr-cli`, so this walks up
+/// two levels to reach the workspace root. `testdata/` and the shared `target/`
+/// directory both live there — cargo keeps one target dir at the workspace root
+/// regardless of which member is being built, so `binary_path()` still resolves
+/// `target/debug/transcodarr` unchanged.
 pub fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crates/<name> is always two levels below the workspace root")
+        .to_path_buf()
 }
 
 /// Get the path to the testdata directory

@@ -1,38 +1,60 @@
+[workspace]
 # file: Cargo.toml
-# version: 0.3.0
-# guid: d4c3b2a1-9f8e-7d6c-5b4a-3c2d1e0f9a8b
-# last-edited: 2026-07-31
+# version: 1.0.0
+# guid: 4f8b1d27-3a60-4c95-b1e8-7d02a6f39c14
+# last-edited: 2026-08-01
+resolver = "2"
+members = ["crates/*"]
 
-[package]
-name = "transcodarr"
-version = "0.1.0"
+[workspace.package]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Rust CLI wrapper around ffmpeg/ffprobe to transcode media while preserving metadata."
+# Promotes the README's prose recommendation to an enforced MSRV.
+rust-version = "1.76"
 repository = "https://github.com/falkcorp/transcodarr"
 homepage = "https://github.com/falkcorp/transcodarr"
-readme = "README.md"
-categories = ["command-line-utilities", "multimedia"]
-keywords = ["ffmpeg", "ffprobe", "transcode", "media", "metadata"]
 
-[dependencies]
+# Declared workspace-wide so later phases reference `workspace = true` rather
+# than re-pinning. A dependency listed here costs nothing until a member uses it.
+[workspace.dependencies]
 anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+blake3 = "1"
+camino = { version = "1", features = ["serde1"] }
 clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-
-[dev-dependencies]
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "process",
+  "signal",
+  "sync",
+  "fs",
+  "time",
+] }
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+tonic-build = "0.12"
+axum = "0.7"
+tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
+rust-embed = { version = "8" }
+rusqlite = { version = "0.32", features = [
+  "bundled",
+  "serde_json",
+  "blob",
+  "backup",
+] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+arc-swap = "1"
+walkdir = "2"
+rustls = "0.23"
+humantime-serde = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[features]
-default = []
-json = ["serde", "serde_json"]
-
-[[bin]]
-name = "transcodarr"
-path = "src/main.rs"
-
-[[bench]]
-name = "transcode_benchmark"
-harness = false

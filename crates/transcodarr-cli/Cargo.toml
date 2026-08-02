@@ -1,0 +1,36 @@
+# file: crates/transcodarr-cli/Cargo.toml
+# version: 1.0.0
+# guid: 2e5a9f13-c847-4b02-96d1-8f3b0d64ae57
+# last-edited: 2026-08-01
+
+[package]
+name = "transcodarr-cli"
+version = "0.1.0"
+description = "Rust CLI wrapper around ffmpeg/ffprobe to transcode media while preserving metadata."
+readme = "../../README.md"
+categories = ["command-line-utilities", "multimedia"]
+keywords = ["ffmpeg", "ffprobe", "transcode", "media", "metadata"]
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+transcodarr-core = { path = "../transcodarr-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+# The binary keeps its historic name: `target/debug/transcodarr` regardless of
+# which crate now owns it, so the integration tests resolve it unchanged.
+[[bin]]
+name = "transcodarr"
+path = "src/main.rs"
+
+[[bench]]
+name = "transcode_benchmark"
+harness = false

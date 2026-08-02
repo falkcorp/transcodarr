@@ -11,7 +11,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn project_root() -> PathBuf {
+    // CARGO_MANIFEST_DIR is now crates/transcodarr-cli; testdata/ and the shared
+    // target/ dir both live two levels up at the workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crates/<name> is always two levels below the workspace root")
+        .to_path_buf()
 }
 
 fn testdata_dir() -> PathBuf {
