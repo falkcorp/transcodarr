@@ -1,10 +1,10 @@
 # file: .gitignore
-# version: 1.0.2
+# version: 1.1.0
 # guid: 8a9b0c1d-2e3f-4a5b-8c9d-0e1f2a3b4c5d
+# last-edited: 2026-08-01
 
 # Rust / Cargo
 target/
-Cargo.lock
 
 # Editors/IDE
 .vscode/
