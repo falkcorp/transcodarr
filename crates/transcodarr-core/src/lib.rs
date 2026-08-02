@@ -18,6 +18,7 @@ pub mod failure;
 pub mod job;
 pub mod paths;
 pub mod plan;
+pub mod policy;
 pub mod preset;
 pub mod probe;
 pub mod validate;
