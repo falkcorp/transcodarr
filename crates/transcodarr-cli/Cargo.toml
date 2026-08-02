@@ -18,8 +18,10 @@ homepage.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 clap = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
+transcodarr-agent = { path = "../transcodarr-agent" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
