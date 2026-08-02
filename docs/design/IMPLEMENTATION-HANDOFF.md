@@ -1,7 +1,7 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 2.0.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
-<!-- last-edited: 2026-08-01 -->
+<!-- last-edited: 2026-08-02 -->
 
 # Implementation handoff — transcodarr
 
@@ -15,6 +15,37 @@ Read in this order:
    **Phased Delivery Plan** (Phase 0–7) is the execution roadmap.
 3. `docs/design/synthesis-decisions.md` — the binding naming contract. SQL
    tables, Rust types, RPCs, metrics, job states. **Treat as authoritative.**
+
+## Phase status (updated 2026-08-02)
+
+| Phase | State |
+| --- | --- |
+| **0 — Environment preflight** | **Done on U0 and U1**, both commit-eligible. `windows-rtx2070` not run — see `PHASE0-RESULTS.md`. Does not block Phase 2. |
+| **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
+| 2 — `transcodarr-store`, scanner, evaluator | Not started. Next. Runs on the server. |
+| 3 — Single-node executor and commit ritual | Not started. Revisit D14 here. |
+| 4 — Protocol, one agent, dispatcher | Not started. |
+| 5 — GPU class, capability probing | Not started. |
+| 6 — Observability, schedules, UI | Not started. |
+| 7 — Hardening | Not started. |
+
+`transcodarr-core` is finished: `paths`, `plan`, `preset`, `probe`, `validate`,
+`capability`, `failure`, `facts`, `policy`. `transcodarr-agent` exists with
+`preflight` only.
+
+### Carry-forward items
+
+1. **`windows-rtx2070` preflight.** The one open Phase 0 item. Tdarr's
+   `get-nodes` reports no address for it. Run it as the node's service user
+   against the library path it commits into. If `RenameProbe` fails, that is the
+   expected SMB result and is handled: mark the agent produce-only.
+2. **`CpuQuotaReader` reads fixed cgroup paths.** It reported 48 cores on U1
+   despite `CPUQuota=1600%`, because the quota lives on the delegated
+   `tdarr-node.service` slice. It should resolve `/proc/self/cgroup`. It
+   under-constrains rather than over-constrains, so it is not dangerous — but a
+   scheduler trusting it would over-commit U1 threefold. **Fix before Phase 4.**
+3. **Run preflight as the user that will commit.** Not as root. On a
+   `root_squash` export every path fails `EACCES` and the answer is meaningless.
 
 ## Current state
 
