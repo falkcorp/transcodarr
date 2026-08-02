@@ -1,0 +1,24 @@
+# file: crates/transcodarr-core/Cargo.toml
+# version: 1.0.0
+# guid: b7c0e934-52af-4d18-9e63-0a1f5c7b28d0
+# last-edited: 2026-08-01
+
+[package]
+name = "transcodarr-core"
+version = "0.1.0"
+description = "Pure domain model for transcodarr: probe facts, policy, capability matching, encode plans, output validation. No I/O."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Deliberately narrow. No tokio, no rusqlite, no tonic -- the layering rule is
+# that core depends on no internal crate and on nothing async, DB, or network.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+camino = { workspace = true }
+toml = { workspace = true }
