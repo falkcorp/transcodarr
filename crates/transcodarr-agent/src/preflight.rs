@@ -127,45 +127,76 @@ pub fn rename_probe(dir: &Path) -> ProbeResult {
     let dest = dir.join(".transcodarr-preflight-dest");
     let src = dir.join(".transcodarr-preflight-src");
 
-    let run = || -> anyhow::Result<String> {
+    // Setup failure and rename failure mean completely different things and must
+    // never be conflated. "I could not create a file here" is a wrong path or a
+    // permissions problem — inconclusive. "I created the files and the rename
+    // did the wrong thing" is architecture-changing. Reporting the first as the
+    // second would wrongly demote a perfectly capable node to produce-only.
+    let setup = || -> std::io::Result<File> {
         fs::write(&dest, b"OLD")?;
         fs::write(&src, b"NEW")?;
-
         // Hold the destination open across the rename. This is what SMB and
-        // Windows sharing semantics typically refuse.
-        let holder = File::open(&dest)?;
+        // Windows sharing semantics typically refuse, and renaming over a
+        // *closed* file would pass on filesystems where the real commit fails.
+        File::open(&dest)
+    };
 
-        fs::rename(&src, &dest)?;
-
-        let after = fs::read(&dest)?;
-        drop(holder);
-
-        if after == b"NEW" {
-            Ok("rename over an open destination succeeded; contents are the new file".into())
-        } else {
-            anyhow::bail!(
-                "rename reported success but destination still holds the old contents ({} bytes)",
-                after.len()
-            )
+    let holder = match setup() {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = fs::remove_file(&dest);
+            let _ = fs::remove_file(&src);
+            return ProbeResult {
+                name,
+                status: ProbeStatus::Warn,
+                detail: format!(
+                    "INCONCLUSIVE: could not create test files in {} ({e}). \
+                     This says nothing about rename semantics — re-run against a \
+                     directory this user can write to, such as the library path the \
+                     agent will actually commit into.",
+                    dir.display()
+                ),
+            };
         }
     };
 
-    let result = run();
+    let renamed = fs::rename(&src, &dest);
+    let after = fs::read(&dest);
+    drop(holder);
     let _ = fs::remove_file(&dest);
     let _ = fs::remove_file(&src);
 
-    match result {
-        Ok(detail) => ProbeResult {
+    match (renamed, after) {
+        (Ok(()), Ok(bytes)) if bytes == b"NEW" => ProbeResult {
             name,
             status: ProbeStatus::Pass,
-            detail,
+            detail: "rename over an open destination succeeded; contents are the new file".into(),
         },
-        Err(e) => ProbeResult {
+        (Ok(()), Ok(bytes)) => ProbeResult {
             name,
             status: ProbeStatus::Fail,
             detail: format!(
-                "{e}. This machine must NOT be commit-eligible: it can produce output \
-                 but a server-local agent must perform the replace."
+                "rename reported success but the destination still holds the old contents \
+                 ({} bytes). This machine must NOT be commit-eligible: it can produce \
+                 output but a server-local agent must perform the replace.",
+                bytes.len()
+            ),
+        },
+        (Err(e), _) => ProbeResult {
+            name,
+            status: ProbeStatus::Fail,
+            detail: format!(
+                "rename over an open destination was refused ({e}). This machine must NOT \
+                 be commit-eligible: it can produce output but a server-local agent must \
+                 perform the replace."
+            ),
+        },
+        (Ok(()), Err(e)) => ProbeResult {
+            name,
+            status: ProbeStatus::Fail,
+            detail: format!(
+                "rename succeeded but the destination could not be read back ({e}); \
+                 treating as not commit-eligible."
             ),
         },
     }
@@ -335,9 +366,12 @@ pub fn zfs_probe(path: &Path) -> ProbeResult {
                 held_pct,
                 avail as f64 / 1e9
             );
-            // Any non-trivial snapshot hold means reclaim reporting must read
-            // ZFS accounting rather than file sizes.
-            if snaps > 0 {
+            // A material hold, not merely a non-zero one. U0 reports a few MB
+            // held against 157 TB used; warning on that trains the operator to
+            // ignore the probe. The threshold that matters is whether reclaim
+            // reporting would be materially wrong: 1% of used, or 1 GB.
+            let material = snaps > 1_000_000_000 || held_pct >= 1.0;
+            if material {
                 ProbeResult {
                     name,
                     status: ProbeStatus::Warn,
@@ -450,15 +484,29 @@ mod tests {
         assert!(left.is_empty(), "probe must clean up after itself");
     }
 
+    /// A directory we cannot write to says nothing about rename semantics.
+    /// Reporting FAIL there would wrongly demote a capable node to produce-only
+    /// -- which is exactly what happened on U1's root_squash NFS mount.
     #[test]
-    fn rename_probe_fails_loudly_on_an_unwritable_directory() {
+    fn an_unwritable_directory_is_inconclusive_not_a_failure() {
         let r = rename_probe(Path::new("/nonexistent-transcodarr-preflight"));
-        assert_eq!(r.status, ProbeStatus::Fail);
+        assert_eq!(r.status, ProbeStatus::Warn, "{}", r.detail);
+        assert!(r.detail.contains("INCONCLUSIVE"), "{}", r.detail);
         assert!(
-            r.detail.contains("must NOT be commit-eligible"),
-            "the failure must say what it implies: {}",
-            r.detail
+            !r.detail.contains("must NOT be commit-eligible"),
+            "an inconclusive probe must not imply an architecture change"
         );
+    }
+
+    /// Inconclusive is still not eligible: silence is not consent.
+    #[test]
+    fn an_inconclusive_rename_probe_is_not_commit_eligible() {
+        let r = PreflightReport {
+            probes: vec![rename_probe(Path::new(
+                "/nonexistent-transcodarr-preflight",
+            ))],
+        };
+        assert!(!r.commit_eligible());
     }
 
     #[test]
