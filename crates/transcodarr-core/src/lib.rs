@@ -13,7 +13,9 @@
 //! than maintaining two implementations that can drift apart.
 
 pub mod capability;
+pub mod facts;
 pub mod failure;
+pub mod job;
 pub mod paths;
 pub mod plan;
 pub mod preset;
