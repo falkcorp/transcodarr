@@ -1,5 +1,5 @@
 # file: crates/transcodarr-store/Cargo.toml
-# version: 1.0.0
+# version: 1.1.0
 # guid: 9c31f70a-4e28-4b6d-85af-2d90c6e13b74
 # last-edited: 2026-08-03
 
@@ -16,6 +16,11 @@ homepage.workspace = true
 # Owns SQLite and nothing else. Only transcodarr-server links this crate; an
 # agent must stay copyable to the Windows node without dragging SQLite along.
 [dependencies]
+# r2d2_sqlite must track the same rusqlite as the workspace pin, or the two
+# would link separate copies of SQLite and the read pool would be looking at a
+# different library than the writer.
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

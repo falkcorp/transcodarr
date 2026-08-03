@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/plan.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 7e2b4c98-1d05-4a37-92f6-c8b30e1a5d64
-// last-edited: 2026-08-01
+// last-edited: 2026-08-03
 //! Encoder identities, pixel formats, and ffmpeg argv construction.
 //!
 //! `build_ffmpeg_argv` is the single source of the command line. The dry-run
@@ -69,6 +69,33 @@ pub enum BitDepth {
     Ten,
     /// 12-bit.
     Twelve,
+}
+
+impl BitDepth {
+    /// Bits per sample, which is how the depth is stored.
+    ///
+    /// A number rather than a name because the column is an INTEGER and
+    /// because `#[non_exhaustive]` would force a wildcard arm on any
+    /// downstream mapping — and a wildcard here would silently record 12-bit
+    /// source as 8-bit, which is exactly the upconversion that must never
+    /// happen.
+    pub fn bits(self) -> u8 {
+        match self {
+            BitDepth::Eight => 8,
+            BitDepth::Ten => 10,
+            BitDepth::Twelve => 12,
+        }
+    }
+
+    /// Recover a depth from bits per sample. `None` for anything else.
+    pub fn from_bits(bits: u8) -> Option<Self> {
+        Some(match bits {
+            8 => BitDepth::Eight,
+            10 => BitDepth::Ten,
+            12 => BitDepth::Twelve,
+            _ => return None,
+        })
+    }
 }
 
 /// Encoder-specific pixel format.

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/job.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 9e17b3c0-6d42-4a85-b2f9-0c73e5a18ff6
-// last-edited: 2026-08-02
+// last-edited: 2026-08-03
 //! Job identity and the state machine.
 //!
 //! Transitions are checked rather than assumed. Every state change in the store
@@ -61,7 +61,82 @@ pub enum JobState {
     NeedsOperator,
 }
 
+impl JobClass {
+    /// The canonical spelling, which is also the value stored in SQLite.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobClass::Audio => "Audio",
+            JobClass::VideoGpu => "VideoGpu",
+            JobClass::VideoCpu => "VideoCpu",
+            JobClass::Probe => "Probe",
+            JobClass::Verify => "Verify",
+        }
+    }
+
+    /// Parse the canonical spelling. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "Audio" => JobClass::Audio,
+            "VideoGpu" => JobClass::VideoGpu,
+            "VideoCpu" => JobClass::VideoCpu,
+            "Probe" => JobClass::Probe,
+            "Verify" => JobClass::Verify,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for JobClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl JobState {
+    /// The canonical spelling, which is also the value stored in SQLite.
+    ///
+    /// Lives here rather than in the store because these enums are
+    /// `#[non_exhaustive]`: a downstream crate would be forced to write a
+    /// wildcard arm, and a wildcard in a state-to-text mapping means a new
+    /// variant is silently persisted under some other variant's name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobState::Pending => "Pending",
+            JobState::Blocked => "Blocked",
+            JobState::Eligible => "Eligible",
+            JobState::Assigned => "Assigned",
+            JobState::Running => "Running",
+            JobState::Verifying => "Verifying",
+            JobState::Committing => "Committing",
+            JobState::Retrying => "Retrying",
+            JobState::Succeeded => "Succeeded",
+            JobState::Failed => "Failed",
+            JobState::Cancelled => "Cancelled",
+            JobState::DeadLettered => "DeadLettered",
+            JobState::NeedsOperator => "NeedsOperator",
+        }
+    }
+
+    /// Parse the canonical spelling. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "Pending" => JobState::Pending,
+            "Blocked" => JobState::Blocked,
+            "Eligible" => JobState::Eligible,
+            "Assigned" => JobState::Assigned,
+            "Running" => JobState::Running,
+            "Verifying" => JobState::Verifying,
+            "Committing" => JobState::Committing,
+            "Retrying" => JobState::Retrying,
+            "Succeeded" => JobState::Succeeded,
+            "Failed" => JobState::Failed,
+            "Cancelled" => JobState::Cancelled,
+            "DeadLettered" => JobState::DeadLettered,
+            "NeedsOperator" => JobState::NeedsOperator,
+            _ => return None,
+        })
+    }
+
     /// Whether this state is terminal.
     pub fn is_terminal(self) -> bool {
         matches!(

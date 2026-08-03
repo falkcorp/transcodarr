@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/lib.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 6d2a90fb-1c47-4358-b0e9-a7f43c8152d6
 // last-edited: 2026-08-03
 #![deny(unsafe_code)]
@@ -11,9 +11,13 @@
 //! engine along with it.
 
 pub mod db;
+pub mod pool;
+pub mod repo;
 pub mod writer;
 
 pub use db::Db;
+pub use pool::ReadPool;
+pub use repo::{DispatchBlockRepo, FileRepo, JobRepo, LibraryRepo};
 pub use writer::{WriteAck, WriteLane, WriteOp, Writer};
 
 use thiserror::Error;
@@ -65,6 +69,53 @@ pub enum StoreError {
     /// The writer thread is no longer running.
     #[error("writer stopped")]
     WriterStopped,
+
+    /// A row that was required was not there.
+    #[error("no {kind} with id {id}")]
+    NotFound {
+        /// What was being looked for.
+        kind: &'static str,
+        /// The identifier that found nothing.
+        id: String,
+    },
+
+    /// A stored value is not one this binary understands.
+    ///
+    /// The `CHECK` constraints make this unreachable for rows written by a
+    /// matching binary, so it means a newer binary wrote the row — and guessing
+    /// is worse than refusing.
+    #[error("column {column} holds {value}, which this binary does not recognise")]
+    UnknownEnum {
+        /// Which column.
+        column: &'static str,
+        /// What it held.
+        value: String,
+    },
+
+    /// A job transition the state machine forbids.
+    #[error("job {job_id}: {from} -> {to} is not a legal transition")]
+    IllegalTransition {
+        /// Which job.
+        job_id: String,
+        /// State it was expected to be in.
+        from: String,
+        /// State that was requested.
+        to: String,
+    },
+
+    /// A compare-and-swap transition lost its race.
+    ///
+    /// The job was not in the expected state when the `UPDATE` ran, so somebody
+    /// else moved it first. Reporting this rather than retrying is deliberate:
+    /// the caller's decision was made against state that no longer holds, and
+    /// re-deciding is its job, not the store's.
+    #[error("job {job_id} was no longer in state {expected}")]
+    TransitionRaceLost {
+        /// Which job.
+        job_id: String,
+        /// The state the caller believed it was in.
+        expected: String,
+    },
 
     /// Measured fsync latency is too high for a single-writer design.
     #[error(

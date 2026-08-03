@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/writer.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 0a63f8d1-72c4-4e05-b93a-15d6c084e27f
 // last-edited: 2026-08-03
 //! The single writer.
@@ -65,7 +65,7 @@ pub struct WriteOp {
     /// Operator-readable name, used in errors and poison reports.
     pub name: String,
     #[allow(clippy::type_complexity)]
-    run: Box<dyn FnOnce(&Connection) -> Result<u64, StoreError> + Send>,
+    run: Box<dyn FnOnce(&Connection) -> Result<WriteAck, StoreError> + Send>,
 }
 
 impl std::fmt::Debug for WriteOp {
@@ -75,14 +75,36 @@ impl std::fmt::Debug for WriteOp {
 }
 
 impl WriteOp {
-    /// Build an operation from a name and a closure over the connection.
+    /// Build an operation from a name and a closure returning rows affected.
     pub fn new<F>(name: impl Into<String>, run: F) -> Self
     where
         F: FnOnce(&Connection) -> Result<u64, StoreError> + Send + 'static,
     {
         Self {
             name: name.into(),
-            run: Box::new(run),
+            run: Box::new(move |c| run(c).map(WriteAck::rows)),
+        }
+    }
+
+    /// Build an operation that also reports a row id back to its caller.
+    ///
+    /// The scanner needs the `file.id` an upsert settled on so it can attach
+    /// streams and jobs to it, and `last_insert_rowid()` cannot supply it: an
+    /// upsert that takes the `DO UPDATE` branch inserts nothing, so the rowid
+    /// on the connection still belongs to some earlier operation. The op that
+    /// knows which row it touched is the only thing that can say.
+    pub fn new_with_id<F>(name: impl Into<String>, run: F) -> Self
+    where
+        F: FnOnce(&Connection) -> Result<(u64, i64), StoreError> + Send + 'static,
+    {
+        Self {
+            name: name.into(),
+            run: Box::new(move |c| {
+                run(c).map(|(rows, id)| WriteAck {
+                    rows,
+                    last_id: Some(id),
+                })
+            }),
         }
     }
 }
@@ -92,6 +114,22 @@ impl WriteOp {
 pub struct WriteAck {
     /// Rows affected.
     pub rows: u64,
+    /// The row id the operation settled on, when it has one to report.
+    ///
+    /// Deliberately not overloaded onto `rows`. A field that sometimes means
+    /// "how many" and sometimes means "which one" is a bug waiting for the
+    /// commit ledger in Phase 3.
+    pub last_id: Option<i64>,
+}
+
+impl WriteAck {
+    /// An acknowledgement carrying only a row count.
+    pub fn rows(rows: u64) -> Self {
+        Self {
+            rows,
+            last_id: None,
+        }
+    }
 }
 
 struct Envelope {
@@ -259,9 +297,9 @@ fn apply_batch(
         }
 
         match (op.run)(conn) {
-            Ok(rows) => {
+            Ok(ack) => {
                 let _ = conn.execute_batch(&format!("RELEASE {sp};"));
-                let _ = reply.send(Ok(WriteAck { rows }));
+                let _ = reply.send(Ok(ack));
             }
             Err(e) => {
                 // Roll back this op alone; every other op in the batch stands.
@@ -411,6 +449,47 @@ mod tests {
         drop(w);
         // The handle is gone; nothing to submit to. The important property is
         // that a caller never panics because the writer went away.
+    }
+
+    /// A plain op reports rows and nothing else. Overloading `rows` to
+    /// sometimes carry a row id is the bug this field exists to prevent.
+    #[test]
+    fn an_ordinary_write_reports_no_row_id() {
+        let (_d, w) = writer();
+        let ack = w
+            .submit_blocking(WriteLane::Normal, insert_pool("p1"))
+            .unwrap();
+        assert_eq!(ack.rows, 1);
+        assert_eq!(ack.last_id, None);
+    }
+
+    /// An op that knows which row it settled on can say so — the scanner needs
+    /// this because an upsert taking the `DO UPDATE` branch inserts nothing,
+    /// leaving `last_insert_rowid()` pointing at some earlier operation.
+    #[test]
+    fn an_op_can_report_the_row_it_settled_on() {
+        let (_d, w) = writer();
+        let ack = w
+            .submit_blocking(
+                WriteLane::Normal,
+                WriteOp::new_with_id("insert_sample", |c| {
+                    c.execute(
+                        "INSERT INTO storage_pool (id,name,dataset,kind) VALUES ('p','n','d','k')",
+                        [],
+                    )?;
+                    let rows = c.execute(
+                        "INSERT INTO pool_reclaim_sample
+                           (pool_id, at_unix, used_bytes, usedbysnapshots_bytes,
+                            available_bytes, referenced_bytes)
+                         VALUES ('p', 0, 1, 2, 3, 4)",
+                        [],
+                    )?;
+                    Ok((rows as u64, c.last_insert_rowid()))
+                }),
+            )
+            .unwrap();
+        assert_eq!(ack.rows, 1);
+        assert_eq!(ack.last_id, Some(1));
     }
 
     #[test]

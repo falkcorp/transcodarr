@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/facts.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 7c04e6a8-1b35-49df-a70c-2e58f3b91d64
-// last-edited: 2026-08-02
+// last-edited: 2026-08-03
 //! Decision-relevant facts derived from a probe.
 //!
 //! Policy never sees a `MediaProbe`. It sees `FileFacts` — a flattened summary
@@ -25,6 +25,37 @@ pub enum SizeBucket {
     Medium,
     /// Large files, which get their own low concurrency cap.
     Large,
+}
+
+impl SizeBucket {
+    /// The canonical spelling, which is also the value stored in SQLite.
+    ///
+    /// Lives here rather than in the store because the enum is
+    /// `#[non_exhaustive]`: a downstream mapping would need a wildcard arm, and
+    /// a wildcard here means a new bucket is silently persisted as an old one.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SizeBucket::Small => "Small",
+            SizeBucket::Medium => "Medium",
+            SizeBucket::Large => "Large",
+        }
+    }
+
+    /// Parse the canonical spelling. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "Small" => SizeBucket::Small,
+            "Medium" => SizeBucket::Medium,
+            "Large" => SizeBucket::Large,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for SizeBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Byte boundaries between size buckets.

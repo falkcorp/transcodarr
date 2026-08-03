@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
-// last-edited: 2026-08-02
+// last-edited: 2026-08-03
 //! The rules engine, and `Default Space Saver`.
 //!
 //! Rules are an ordered list of typed `when`/`then` entries evaluated
@@ -153,6 +153,37 @@ pub enum DecisionClass {
     AudioThenVideo,
     /// Excluded and flagged.
     Quarantined,
+}
+
+impl DecisionClass {
+    /// The canonical spelling, which is also the value stored in SQLite.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionClass::None => "None",
+            DecisionClass::Audio => "Audio",
+            DecisionClass::Video => "Video",
+            DecisionClass::AudioThenVideo => "AudioThenVideo",
+            DecisionClass::Quarantined => "Quarantined",
+        }
+    }
+
+    /// Parse the canonical spelling. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "None" => DecisionClass::None,
+            "Audio" => DecisionClass::Audio,
+            "Video" => DecisionClass::Video,
+            "AudioThenVideo" => DecisionClass::AudioThenVideo,
+            "Quarantined" => DecisionClass::Quarantined,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for DecisionClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Target audio encode.
