@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/lib.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 5c1d8b46-9e73-42a0-8f15-3b6a0c27d94e
-// last-edited: 2026-08-01
+// last-edited: 2026-08-03
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! Pure domain model for transcodarr: probe facts, policy, capability
@@ -15,6 +15,7 @@
 pub mod capability;
 pub mod facts;
 pub mod failure;
+pub mod file;
 pub mod job;
 pub mod paths;
 pub mod plan;
