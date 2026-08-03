@@ -1,7 +1,7 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 2.0.0 -->
+<!-- version: 2.1.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
-<!-- last-edited: 2026-08-02 -->
+<!-- last-edited: 2026-08-03 -->
 
 # Implementation handoff — transcodarr
 
@@ -22,7 +22,7 @@ Read in this order:
 | --- | --- |
 | **0 — Environment preflight** | **Done on U0 and U1**, both commit-eligible. `windows-rtx2070` not run — see `PHASE0-RESULTS.md`. Does not block Phase 2. |
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
-| 2 — `transcodarr-store`, scanner, evaluator | Not started. Next. Runs on the server. |
+| 2 — `transcodarr-store`, scanner, evaluator | **In progress.** Schema + migrations + `Writer` done. `ReadPool`, repositories, `Scanner`, `Evaluator` remain. |
 | 3 — Single-node executor and commit ritual | Not started. Revisit D14 here. |
 | 4 — Protocol, one agent, dispatcher | Not started. |
 | 5 — GPU class, capability probing | Not started. |
@@ -31,7 +31,42 @@ Read in this order:
 
 `transcodarr-core` is finished: `paths`, `plan`, `preset`, `probe`, `validate`,
 `capability`, `failure`, `facts`, `policy`. `transcodarr-agent` exists with
-`preflight` only.
+`preflight` only. `transcodarr-store` has `db` (schema, migrations, pragma
+verification, durability probe) and `writer` (lanes, per-op `SAVEPOINT`, poison
+tracking).
+
+### Phase 2 — what is done and what is next
+
+Done:
+
+- All 21 contract tables as one embedded `STRICT` migration.
+- `idx_job_open_per_file` and `idx_commit_intent_live` — the two invariants that
+  now live in the database rather than in dispatcher discipline.
+- `Db::open` verifies pragmas actually took, and refuses a migration whose text
+  changed since it was applied.
+- `Writer`: `Commit` > `Normal` > `Bulk`, `synchronous=FULL` on the commit lane,
+  per-operation `SAVEPOINT` so a bad op fails alone, poison tracking by op name.
+
+Next, in order:
+
+1. `ReadPool` — r2d2 over read-only connections.
+2. The repositories named in the contract. They must return **domain types from
+   `transcodarr-core`, never `rusqlite::Row`**, and no SQL text may escape the
+   crate. `JobRepo::transition` is a compare-and-swap and must reject any edge
+   `JobState::can_transition` disallows.
+3. `Scanner` — discovery only, idempotent upsert on `path_hash`, identity
+   `(dev, inode)`, default exclusions `.zfs`/`work`/`trash`/`@eaDir`/
+   `lost+found`, mass-missing abort guard, `min_mtime_age_s`.
+4. `Evaluator` — batches of 1000 over `idx_file_needs_eval`.
+5. `transcodarr admin explain <path>` and `admin config validate --diff`.
+
+Milestone: scan and probe all three real libraries (~49.6k files) on the server.
+
+**Two deliberate deviations already made, both documented in the source:**
+`Writer::submit` returns a `std` channel rather than a tokio `oneshot` so the
+store carries no async runtime; and `FSYNC_ABORT_US` is duplicated from
+`transcodarr-agent` rather than shared, because sharing it would invert the
+layering and drag the store into the agent.
 
 ### Carry-forward items
 
