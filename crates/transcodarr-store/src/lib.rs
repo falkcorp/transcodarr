@@ -11,8 +11,10 @@
 //! engine along with it.
 
 pub mod db;
+pub mod writer;
 
 pub use db::Db;
+pub use writer::{WriteAck, WriteLane, WriteOp, Writer};
 
 use thiserror::Error;
 
@@ -59,6 +61,10 @@ pub enum StoreError {
         /// Migration name.
         name: String,
     },
+
+    /// The writer thread is no longer running.
+    #[error("writer stopped")]
+    WriterStopped,
 
     /// Measured fsync latency is too high for a single-writer design.
     #[error(
