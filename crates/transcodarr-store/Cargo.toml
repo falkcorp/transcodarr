@@ -1,0 +1,26 @@
+# file: crates/transcodarr-store/Cargo.toml
+# version: 1.0.0
+# guid: 9c31f70a-4e28-4b6d-85af-2d90c6e13b74
+# last-edited: 2026-08-03
+
+[package]
+name = "transcodarr-store"
+version = "0.1.0"
+description = "transcodarr persistence: SQLite schema, migrations, single-writer task, repositories."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Owns SQLite and nothing else. Only transcodarr-server links this crate; an
+# agent must stay copyable to the Windows node without dragging SQLite along.
+[dependencies]
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+transcodarr-core = { path = "../transcodarr-core" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

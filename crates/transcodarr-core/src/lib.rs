@@ -25,6 +25,15 @@ pub mod validate;
 
 use thiserror::Error;
 
+/// A stable content hash, rendered as lowercase hex.
+///
+/// Used wherever something must be recognised as unchanged across processes and
+/// restarts — policy versions, capability documents, migration text. Stability
+/// is the requirement, not cryptographic strength.
+pub fn stable_hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
 /// Errors produced by the pure domain layer.
 ///
 /// These describe *inputs that do not make sense*, never I/O failures — this
