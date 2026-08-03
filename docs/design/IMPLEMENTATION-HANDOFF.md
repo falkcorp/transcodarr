@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 2.1.0 -->
+<!-- version: 2.2.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-03 -->
 
@@ -22,7 +22,7 @@ Read in this order:
 | --- | --- |
 | **0 — Environment preflight** | **Done on U0 and U1**, both commit-eligible. `windows-rtx2070` not run — see `PHASE0-RESULTS.md`. Does not block Phase 2. |
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
-| 2 — `transcodarr-store`, scanner, evaluator | **In progress.** Schema + migrations + `Writer` done. `ReadPool`, repositories, `Scanner`, `Evaluator` remain. |
+| 2 — `transcodarr-store`, scanner, evaluator | **In progress.** Schema, migrations, `Writer`, `ReadPool` and four repositories done. `Scanner`, `Evaluator` and `admin explain` remain. |
 | 3 — Single-node executor and commit ritual | Not started. Revisit D14 here. |
 | 4 — Protocol, one agent, dispatcher | Not started. |
 | 5 — GPU class, capability probing | Not started. |
@@ -46,21 +46,37 @@ Done:
   changed since it was applied.
 - `Writer`: `Commit` > `Normal` > `Bulk`, `synchronous=FULL` on the commit lane,
   per-operation `SAVEPOINT` so a bad op fails alone, poison tracking by op name.
+- `ReadPool` — r2d2 over read-only connections. Its pragma block is a subset of
+  the writer's, because `journal_mode` cannot be set on a read-only connection.
+- `LibraryRepo`, `FileRepo`, `JobRepo`, `DispatchBlockRepo`, returning core
+  domain types. `JobRepo::transition` is a real compare-and-swap.
 
 Next, in order:
 
-1. `ReadPool` — r2d2 over read-only connections.
-2. The repositories named in the contract. They must return **domain types from
-   `transcodarr-core`, never `rusqlite::Row`**, and no SQL text may escape the
-   crate. `JobRepo::transition` is a compare-and-swap and must reject any edge
-   `JobState::can_transition` disallows.
-3. `Scanner` — discovery only, idempotent upsert on `path_hash`, identity
+1. `Scanner` — discovery only, idempotent upsert on `path_hash`, identity
    `(dev, inode)`, default exclusions `.zfs`/`work`/`trash`/`@eaDir`/
-   `lost+found`, mass-missing abort guard, `min_mtime_age_s`.
-4. `Evaluator` — batches of 1000 over `idx_file_needs_eval`.
-5. `transcodarr admin explain <path>` and `admin config validate --diff`.
+   `lost+found`, mass-missing abort guard, `min_mtime_age_s`. `FileRepo` already
+   provides the upsert, `count_not_seen_in`/`count_live` for the guard, and
+   `mark_missing_op`; `LibraryRepo` provides scan-run accounting and generation
+   allocation.
+2. `Evaluator` — batches of 1000 over `idx_file_needs_eval`, via
+   `FileRepo::needs_eval` and `record_decision_op`.
+3. `transcodarr admin explain <path>` and `admin config validate --diff`.
+
+Both 1 and 2 are contracted to `transcodarr-server`, which does not exist yet.
 
 Milestone: scan and probe all three real libraries (~49.6k files) on the server.
+
+**Seven repositories are deliberately not written.** `AgentRepo`,
+`CommitIntentRepo`, `TrashRepo`, `ScheduleRepo`, `ConfigRepo` and `PoolRepo`
+have no Phase 2 caller and no test that would exercise them; they arrive with
+the phases that call them rather than shipping as untested surface.
+
+**Open layering decision, deliberately deferred.** The store's `Cargo.toml`
+says only `transcodarr-server` links it, but `admin explain` is a CLI command.
+Either the CLI links the store — in which case update that comment — or
+`explain` lives in the server and the CLI calls in. Decide it in the PR that
+adds `explain`, not before.
 
 **Two deliberate deviations already made, both documented in the source:**
 `Writer::submit` returns a `std` channel rather than a tokio `oneshot` so the
