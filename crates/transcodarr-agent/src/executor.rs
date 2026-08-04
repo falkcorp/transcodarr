@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/executor.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8e5a04cb-71f2-4d63-9a80-3c6b1e97fa25
 // last-edited: 2026-08-03
 //! Running ffmpeg, watching it, and judging what it produced.
@@ -298,6 +298,7 @@ impl Executor {
                 "-show_streams",
             ],
             path,
+            None,
         )?;
         let mut parsed = probe::parse_ffprobe_json(&raw).map_err(|e| AgentError::Probe {
             path: path.display().to_string(),
@@ -309,11 +310,24 @@ impl Executor {
 
     /// The presentation timestamp of the last packet, in microseconds.
     ///
-    /// `-read_intervals 999999%+#...` would rewind; instead the tail of the
-    /// file is scanned. `None` when no packet could be read, which the
-    /// validator treats as unprobeable — correctly, since a file with no
-    /// readable packets is not media whatever its header claims.
+    /// `None` when no packet could be read, which the validator treats as
+    /// unprobeable — correctly, since a file with no readable packets is not
+    /// media whatever its header claims.
+    ///
+    /// The interval is an **absolute** seek point, computed from the header
+    /// duration. `-read_intervals -60` looks like "the last sixty seconds" and
+    /// is not: on real media it silently returns nothing, so this function
+    /// returned `None`, the caller fell back to the header duration, and the
+    /// entire last-packet-PTS guarantee quietly stopped applying. It only
+    /// appeared to work on short test fixtures. Measured on a 23-minute Blu-ray
+    /// remux: the absolute form returns 1421.962s against a header duration of
+    /// 1422.016s — the one-frame difference the guard exists to reason about —
+    /// and costs 0.3 seconds on a 7 GB file.
     pub fn last_packet_pts_us(&self, path: &Path) -> Result<Option<u64>, AgentError> {
+        let header_s = self.header_duration_s(path).unwrap_or(0.0);
+        // Sixty seconds of tail is plenty to find the final packet, and seeking
+        // rather than scanning is what keeps this cheap on a 60 GB file.
+        let from = (header_s - 60.0).max(0.0);
         let raw = self.run_ffprobe(
             &[
                 "-v",
@@ -324,18 +338,39 @@ impl Executor {
                 "packet=pts_time",
                 "-of",
                 "csv=p=0",
-                // Only the last 60 seconds. Scanning a 60 GB file end to end
-                // for one timestamp would cost more than the encode.
                 "-read_intervals",
-                "-60",
             ],
             path,
+            Some(&format!("{from:.3}%+#100000")),
         )?;
         let last = raw
             .lines()
             .filter_map(|l| l.trim().trim_end_matches(',').parse::<f64>().ok())
             .fold(None::<f64>, |acc, v| Some(acc.map_or(v, |a| a.max(v))));
         Ok(last.map(|s| (s * 1_000_000.0) as u64))
+    }
+
+    /// The container header's duration, in seconds.
+    ///
+    /// Used only to decide where to seek. It is never the answer: a truncated
+    /// MKV frequently keeps the source duration here, which is the whole reason
+    /// the last packet is consulted at all.
+    fn header_duration_s(&self, path: &Path) -> Option<f64> {
+        let raw = self
+            .run_ffprobe(
+                &[
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ],
+                path,
+                None,
+            )
+            .ok()?;
+        raw.trim().parse::<f64>().ok()
     }
 
     /// Judge an output against the ordered gates.
@@ -359,9 +394,20 @@ impl Executor {
         Ok(validate_output(spec, &probe, exit_code, out_bytes))
     }
 
-    fn run_ffprobe(&self, args: &[&str], path: &Path) -> Result<String, AgentError> {
-        let out = Command::new(&self.config.ffprobe)
-            .args(args)
+    /// `extra` is a single positional value appended after `args` and before
+    /// the path, for options like `-read_intervals` whose value is computed.
+    fn run_ffprobe(
+        &self,
+        args: &[&str],
+        path: &Path,
+        extra: Option<&str>,
+    ) -> Result<String, AgentError> {
+        let mut cmd = Command::new(&self.config.ffprobe);
+        cmd.args(args);
+        if let Some(e) = extra {
+            cmd.arg(e);
+        }
+        let out = cmd
             .arg(path)
             .stdin(Stdio::null())
             .output()

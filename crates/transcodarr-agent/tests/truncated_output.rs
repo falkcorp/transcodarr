@@ -171,3 +171,63 @@ fn a_failed_exit_code_is_rejected_first() {
         "nothing else should have run"
     );
 }
+
+/// The regression that matters most, and that short fixtures cannot catch.
+///
+/// `-read_intervals -60` reads like "the last sixty seconds" and is not: on a
+/// file long enough for the seek to matter it silently returns nothing, so
+/// `last_packet_pts_us` returned `None`, callers fell back to the container
+/// header, and the entire last-packet-PTS guarantee stopped applying — while
+/// every short-fixture test kept passing.
+///
+/// Found on a 23-minute Blu-ray remux on the real server, not here. This test
+/// exists so it cannot come back.
+#[test]
+fn the_last_packet_pts_is_readable_on_a_file_longer_than_the_tail_window() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipping: ffmpeg/ffprobe not present");
+        return;
+    }
+    let d = tempfile::TempDir::new().unwrap();
+    let long = d.path().join("long.mkv");
+
+    // 70 seconds: longer than the 60-second tail window, so the seek is real.
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=70:size=160x120:rate=5",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+        ])
+        .arg(&long)
+        .status()
+        .expect("spawn ffmpeg");
+    assert!(ok.success());
+
+    let ex = Executor::new(ExecutorConfig::default());
+    let pts = ex
+        .last_packet_pts_us(&long)
+        .expect("probing must not error")
+        .expect("a file longer than the tail window must still yield a PTS");
+
+    // Near the end, and not zero -- a fallback to the header would also be
+    // "near the end", so the useful assertion is that we got a packet at all
+    // and that it is plausibly the last one.
+    assert!(
+        pts > 60_000_000,
+        "expected a PTS near 70s, got {}s",
+        pts as f64 / 1e6
+    );
+    assert!(
+        pts <= 71_000_000,
+        "PTS should not exceed the source duration: {}s",
+        pts as f64 / 1e6
+    );
+}
