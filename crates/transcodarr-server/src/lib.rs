@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-03
 #![deny(unsafe_code)]
@@ -14,8 +14,10 @@
 //! are separate jobs held by separate processes, which is what lets a decision
 //! be re-derived from stored facts without touching a byte of media.
 
+pub mod evaluator;
 pub mod scanner;
 
+pub use evaluator::{EvalOutcome, Evaluator};
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
 
 use thiserror::Error;

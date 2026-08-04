@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/capability.rs
 // version: 1.0.0
 // guid: 3f81c5d9-2a64-4e07-b93a-6c05d81ef742
-// last-edited: 2026-08-01
+// last-edited: 2026-08-03
 //! What an agent can do, what a job needs, and whether they match.
 //!
 //! This is the fix for the failure mode that motivated the whole project: a job
@@ -206,6 +206,48 @@ pub enum Requirement {
 /// An ordered, AND-ed list of requirements attached to a job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Requirements(pub Vec<Requirement>);
+
+impl Requirement {
+    /// Whether this requirement partitions agents rather than describing one
+    /// file's needs.
+    ///
+    /// Only categorical requirements form a [`bucket_key`]. `MinFreeBytes` and
+    /// `MinEffectiveCores` carry a per-file byte count and `MountCovers` a
+    /// per-file path, so including them would drive cardinality toward one
+    /// bucket per job and collapse the matcher to O(queue) -- the precomputed
+    /// eligibility would then cost more than it saves (flaw A5). They become
+    /// per-job admission checks at dispatch time instead.
+    pub fn is_categorical(&self) -> bool {
+        match self {
+            Requirement::AgentClass(_)
+            | Requirement::Encoder(_)
+            | Requirement::Decoder(_)
+            | Requirement::Muxer(_)
+            | Requirement::PlatformIn(_)
+            | Requirement::LabelEquals(_, _) => true,
+            Requirement::MinEffectiveCores(_)
+            | Requirement::MinFreeBytes(_)
+            | Requirement::MountCovers(_) => false,
+        }
+    }
+}
+
+/// A stable key over the categorical requirements of a job.
+///
+/// Two jobs sharing a key are interchangeable as far as agent *capability* is
+/// concerned, so eligibility is computed once per key rather than once per job.
+/// Sorted before hashing so requirement order -- an artefact of how the planner
+/// happened to build the vector -- cannot split one bucket into two.
+pub fn bucket_key(reqs: &Requirements) -> String {
+    let mut parts: Vec<String> = reqs
+        .0
+        .iter()
+        .filter(|r| r.is_categorical())
+        .map(|r| format!("{r:?}"))
+        .collect();
+    parts.sort();
+    crate::stable_hash(parts.join("|").as_bytes())
+}
 
 /// The specific requirement an agent failed, with an operator-readable reason.
 ///
@@ -481,5 +523,91 @@ mod tests {
         assert_eq!(a.hash(), b.hash());
         b.encoders.push(EncoderId::Libx265);
         assert_ne!(a.hash(), b.hash(), "drift must be detectable");
+    }
+}
+
+#[cfg(test)]
+mod bucket_key_tests {
+    use super::*;
+    use crate::plan::{BitDepth, EncoderId};
+
+    fn base() -> Vec<Requirement> {
+        vec![
+            Requirement::AgentClass(AgentClass::Gpu),
+            Requirement::Encoder(EncoderId::HevcNvenc),
+            Requirement::Muxer(ContainerId::Matroska),
+            Requirement::Decoder(DecoderTriple {
+                codec: "h264".into(),
+                profile: "High".into(),
+                bit_depth: BitDepth::Eight,
+                kind: DecoderKind::Nvdec,
+            }),
+        ]
+    }
+
+    /// Requirement order is an artefact of how the planner built the vector.
+    /// If it changed the key, one bucket would silently become two and the
+    /// precomputed eligibility would be computed twice for the same agents.
+    #[test]
+    fn requirement_order_does_not_change_the_key() {
+        let a = Requirements(base());
+        let mut reversed = base();
+        reversed.reverse();
+        assert_eq!(bucket_key(&a), bucket_key(&Requirements(reversed)));
+    }
+
+    /// The whole point of A5. A per-file byte count or path in the key drives
+    /// cardinality toward one bucket per job, and precomputing eligibility then
+    /// costs more than it saves.
+    #[test]
+    fn per_file_requirements_are_excluded_from_the_key() {
+        let plain = Requirements(base());
+
+        let mut with_bytes = base();
+        with_bytes.push(Requirement::MinFreeBytes(80 * 1024 * 1024 * 1024));
+        let mut with_other_bytes = base();
+        with_other_bytes.push(Requirement::MinFreeBytes(3 * 1024 * 1024 * 1024));
+        let mut with_path = base();
+        with_path.push(Requirement::MountCovers("/mnt/tv/show/s01".into()));
+        let mut with_cores = base();
+        with_cores.push(Requirement::MinEffectiveCores(13.0));
+
+        for variant in [with_bytes, with_other_bytes, with_path, with_cores] {
+            assert_eq!(
+                bucket_key(&plain),
+                bucket_key(&Requirements(variant)),
+                "a per-file requirement must not open a new bucket"
+            );
+        }
+    }
+
+    /// ...but a genuinely different capability must land elsewhere, or a GPU
+    /// job would be handed to a CPU-only agent.
+    #[test]
+    fn a_different_capability_is_a_different_bucket() {
+        let gpu = Requirements(base());
+        let mut cpu = base();
+        cpu[0] = Requirement::AgentClass(AgentClass::Cpu);
+        assert_ne!(bucket_key(&gpu), bucket_key(&Requirements(cpu)));
+
+        let mut other_depth = base();
+        other_depth[3] = Requirement::Decoder(DecoderTriple {
+            codec: "h264".into(),
+            profile: "High 10".into(),
+            bit_depth: BitDepth::Ten,
+            kind: DecoderKind::Nvdec,
+        });
+        assert_ne!(
+            bucket_key(&gpu),
+            bucket_key(&Requirements(other_depth)),
+            "10-bit decode is a different capability from 8-bit"
+        );
+    }
+
+    #[test]
+    fn the_key_is_stable_across_calls() {
+        let r = Requirements(base());
+        assert_eq!(bucket_key(&r), bucket_key(&r));
+        assert!(!bucket_key(&Requirements(vec![])).is_empty());
     }
 }
