@@ -17,7 +17,7 @@ pub mod writer;
 
 pub use db::Db;
 pub use pool::ReadPool;
-pub use repo::{DispatchBlockRepo, FileRepo, JobRepo, LibraryRepo};
+pub use repo::{CommitIntentRepo, DispatchBlockRepo, FileRepo, JobRepo, LibraryRepo, TrashRepo};
 pub use writer::{WriteAck, WriteLane, WriteOp, Writer};
 
 use thiserror::Error;

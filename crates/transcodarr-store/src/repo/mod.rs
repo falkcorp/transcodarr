@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/mod.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 7a10c5e4-2b98-4d31-95f7-6e0a48b3d271
 // last-edited: 2026-08-03
 //! Repositories.
@@ -15,23 +15,26 @@
 //! values for [`crate::Writer`]. A repository never holds a write connection of
 //! its own, so there is exactly one writer no matter how many exist.
 //!
-//! **Only four of the eleven contracted repositories are implemented here** —
-//! [`FileRepo`], [`LibraryRepo`], [`JobRepo`] and [`DispatchBlockRepo`], the
-//! four the Phase 2 milestone actually exercises. `AgentRepo`,
-//! `CommitIntentRepo`, `TrashRepo`, `ScheduleRepo`, `ConfigRepo` and `PoolRepo`
-//! arrive with the phases that call them. Writing them now would ship six
-//! untested APIs whose first real caller is free to discover they are the
-//! wrong shape.
+//! **Six of the eleven contracted repositories are implemented here** —
+//! [`FileRepo`], [`LibraryRepo`], [`JobRepo`], [`DispatchBlockRepo`] and
+//! [`CommitIntentRepo`] and [`TrashRepo`]. `AgentRepo`, `ScheduleRepo`, `ConfigRepo`
+//! and `PoolRepo` arrive with the phases that call them. Writing them ahead of
+//! a caller would ship untested APIs whose first real user is free to discover
+//! they are the wrong shape.
 
+mod commit_intent;
 mod dispatch_block;
 mod file;
 mod job;
 mod library;
+mod trash;
 
+pub use commit_intent::{CommitIntent, CommitIntentRepo, NewIntent};
 pub use dispatch_block::{DispatchBlock, DispatchBlockRepo};
 pub use file::{FileIdentity, FileRecord, FileRepo, FileUpsert};
 pub use job::{JobEvent, JobRecord, JobRepo, NewJob};
 pub use library::{LibraryRecord, LibraryRepo, ScanRun};
+pub use trash::{MIN_GRACE_SECONDS, TrashEntry, TrashRepo};
 
 use crate::StoreError;
 
