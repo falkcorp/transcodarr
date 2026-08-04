@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/prober.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 9c58a3f1-e072-4d46-8b19-25f7ac0e6b34
 // last-edited: 2026-08-03
 //! Probe ingestion: run `ffprobe` over discovered files and store the facts.
@@ -10,10 +10,9 @@
 //! result, which is what keeps a policy change a database operation rather than
 //! an 85 TB read.
 //!
-//! Concurrency is bounded on purpose and separately from transcode
-//! concurrency. Probing is seek-heavy and the pool is latency-bound: pointing
-//! forty-eight threads at it produces forty-eight slow probes rather than
-//! forty-eight fast ones, and starves any transcode running alongside.
+//! Concurrency is bounded, and tuned from measurement rather than intuition —
+//! see [`DEFAULT_PROBE_CONCURRENCY`], where the first guess was wrong by
+//! roughly a factor of six.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,10 +29,24 @@ use crate::ServerError;
 
 /// How many probes run at once by default.
 ///
-/// Four, not one per core. `ffprobe` on a large remux is dominated by seeks
-/// against a latency-bound pool, so the useful parallelism is small and the
-/// cost of overshooting is paid by every transcode running alongside.
-pub const DEFAULT_PROBE_CONCURRENCY: usize = 4;
+/// Sixteen. An earlier version of this file said four, reasoning that `ffprobe`
+/// is seek-bound against a latency-bound pool so the useful parallelism must be
+/// small. Measured on the production pool (~49.6k files, Tdarr transcoding
+/// alongside), that reasoning was backwards:
+///
+/// | concurrency | files/second |
+/// | --- | --- |
+/// | 8  | 0.35 |
+/// | 32 | 2.0  |
+/// | 96 | 2.18 (load average 35) |
+///
+/// Latency-bound is exactly the case where a deep queue helps: each probe
+/// spends its time waiting, not working, so the pool can service many at once.
+/// The knee is around 32; 96 buys 9% for triple the load. Sixteen is the
+/// default because it captures most of the gain while leaving headroom for
+/// transcodes sharing the pool, and `--probe-concurrency` raises it for a
+/// dedicated ingest run.
+pub const DEFAULT_PROBE_CONCURRENCY: usize = 16;
 
 /// How long a single probe may take before it is abandoned.
 ///

@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 2.2.0 -->
+<!-- version: 3.0.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-03 -->
 
@@ -22,7 +22,7 @@ Read in this order:
 | --- | --- |
 | **0 — Environment preflight** | **Done on U0 and U1**, both commit-eligible. `windows-rtx2070` not run — see `PHASE0-RESULTS.md`. Does not block Phase 2. |
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
-| 2 — `transcodarr-store`, scanner, evaluator | **In progress.** Schema, migrations, `Writer`, `ReadPool` and four repositories done. `Scanner`, `Evaluator` and `admin explain` remain. |
+| 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | Not started. Revisit D14 here. |
 | 4 — Protocol, one agent, dispatcher | Not started. |
 | 5 — GPU class, capability probing | Not started. |
@@ -35,68 +35,84 @@ Read in this order:
 verification, durability probe) and `writer` (lanes, per-op `SAVEPOINT`, poison
 tracking).
 
-### Phase 2 — what is done and what is next
+### Phase 2 — status
 
-Done:
+Shipped, all merged to `main` (PRs #28, #30, #31, #32, #33):
 
-- All 21 contract tables as one embedded `STRICT` migration.
-- `idx_job_open_per_file` and `idx_commit_intent_live` — the two invariants that
-  now live in the database rather than in dispatcher discipline.
-- `Db::open` verifies pragmas actually took, and refuses a migration whose text
-  changed since it was applied.
-- `Writer`: `Commit` > `Normal` > `Bulk`, `synchronous=FULL` on the commit lane,
-  per-operation `SAVEPOINT` so a bad op fails alone, poison tracking by op name.
-- `ReadPool` — r2d2 over read-only connections. Its pragma block is a subset of
-  the writer's, because `journal_mode` cannot be set on a read-only connection.
-- `LibraryRepo`, `FileRepo`, `JobRepo`, `DispatchBlockRepo`, returning core
-  domain types. `JobRepo::transition` is a real compare-and-swap.
+- Schema as one embedded `STRICT` migration, pragma verification, migration
+  checksum refusal, durability probe.
+- `Writer` with priority lanes, per-op `SAVEPOINT`, poison tracking.
+- `ReadPool`, and `LibraryRepo`/`FileRepo`/`JobRepo`/`DispatchBlockRepo`.
+- `transcodarr-server`: `Scanner`, `Prober`, `Evaluator`, `Explainer`,
+  `summarize`, `Runtime`.
+- CLI: `admin add-library`, `libraries`, `scan`, `evaluate`, `explain`,
+  `summary`.
 
-Next, in order:
+243 tests. `cargo fmt -- --check`, `cargo clippy --all-targets --all-features
+-- -D warnings` and `cargo test` all green.
 
-1. `Scanner` — discovery only, idempotent upsert on `path_hash`, identity
-   `(dev, inode)`, default exclusions `.zfs`/`work`/`trash`/`@eaDir`/
-   `lost+found`, mass-missing abort guard, `min_mtime_age_s`. `FileRepo` already
-   provides the upsert, `count_not_seen_in`/`count_live` for the guard, and
-   `mark_missing_op`; `LibraryRepo` provides scan-run accounting and generation
-   allocation.
-2. `Evaluator` — batches of 1000 over `idx_file_needs_eval`, via
-   `FileRepo::needs_eval` and `record_decision_op`.
-3. `transcodarr admin explain <path>` and `admin config validate --diff`.
+**Layering question, now settled.** `transcodarr-cli` does not link
+`transcodarr-store`; it calls `transcodarr-server::Runtime`. No SQL, no
+`rusqlite` type and no repository appears in the CLI.
 
-Both 1 and 2 are contracted to `transcodarr-server`, which does not exist yet.
-
-Milestone: scan and probe all three real libraries (~49.6k files) on the server.
-
-**Seven repositories are deliberately not written.** `AgentRepo`,
+**Seven repositories deliberately not written.** `AgentRepo`,
 `CommitIntentRepo`, `TrashRepo`, `ScheduleRepo`, `ConfigRepo` and `PoolRepo`
-have no Phase 2 caller and no test that would exercise them; they arrive with
-the phases that call them rather than shipping as untested surface.
+have no Phase 2 caller. They arrive with the phases that call them rather than
+shipping as untested surface.
 
-**Open layering decision, deliberately deferred.** The store's `Cargo.toml`
-says only `transcodarr-server` links it, but `admin explain` is a CLI command.
-Either the CLI links the store — in which case update that comment — or
-`explain` lives in the server and the CLI calls in. Decide it in the PR that
-adds `explain`, not before.
+### Phase 2 milestone — what has actually been run
 
-**Two deliberate deviations already made, both documented in the source:**
-`Writer::submit` returns a `std` channel rather than a tokio `oneshot` so the
-store carries no async runtime; and `FSYNC_ABORT_US` is duplicated from
-`transcodarr-agent` rather than shared, because sharing it would invert the
-layering and drag the store into the agent.
+On the server (`172.16.2.30`), against the real libraries, built in
+`~/transcodarr-build`, database at `~/tc/tc.db`:
 
-### Carry-forward items
+| Library | Files | Size | Discovery |
+| --- | --- | --- | --- |
+| tv | 29,343 | — | 28.7 s |
+| anime | 17,825 | 16.1 TiB | 8.5 s |
+| movies | 2,432 | 36.4 TiB | 1.9 s |
+| **total** | **49,600** | | **43 s** |
 
-1. **`windows-rtx2070` preflight.** The one open Phase 0 item. Tdarr's
-   `get-nodes` reports no address for it. Run it as the node's service user
-   against the library path it commits into. If `RenameProbe` fails, that is the
-   expected SMB result and is handled: mark the agent produce-only.
-2. **`CpuQuotaReader` reads fixed cgroup paths.** It reported 48 cores on U1
-   despite `CPUQuota=1600%`, because the quota lives on the delegated
-   `tdarr-node.service` slice. It should resolve `/proc/self/cgroup`. It
-   under-constrains rather than over-constrains, so it is not dangerous — but a
-   scheduler trusting it would over-commit U1 threefold. **Fix before Phase 4.**
-3. **Run preflight as the user that will commit.** Not as root. On a
-   `root_squash` export every path fails `EACCES` and the answer is meaningless.
+Exactly the ~49.6k the architecture document predicted. The `min_mtime_age_s`
+guard skipped 7 files that were being written at the time — the guard working
+in production, not in a test.
+
+**Probe ingestion is the long pole and was still running at handoff.** It is
+detached under `setsid` on the server, logging to `~/tc/full-probe.log`, at
+`--probe-concurrency 32`. Check it with:
+
+```bash
+ssh jdfalk@172.16.2.30 'cd ~/transcodarr-build && \
+  ./target/release/transcodarr admin summary --db ~/tc/tc.db'
+```
+
+At the measured ~2 files/second it needs roughly 7 hours for all 49,600. When it
+finishes, the milestone's remaining assertions are one command each:
+`admin summary` for the decision/GiB breakdown, and `admin evaluate --force` for
+the "re-derive every decision with zero filesystem I/O" claim.
+
+**Measured probe concurrency, correcting a wrong assumption in the code.**
+The first version defaulted to 4 on the reasoning that seek-bound work does not
+parallelise. Measured on the production pool with Tdarr running alongside:
+
+| concurrency | files/second |
+| --- | --- |
+| 8 | 0.35 |
+| 32 | 2.0 |
+| 96 | 2.18 (load average 35) |
+
+Latency-bound is precisely the case where a deep queue helps — each probe waits
+rather than works. The knee is near 32; 96 buys 9% for triple the load. The
+default is now 16, with `--probe-concurrency` for a dedicated ingest run.
+
+### Still outstanding in Phase 2
+
+1. **Finish the probe run**, then confirm the two milestone assertions above.
+2. **`admin config validate --diff`** is specified for this phase but needs a
+   configuration file format that does not exist yet — there is nothing to
+   validate or diff. Building one now would mean guessing at the schedule and
+   dispatch settings Phases 4-6 define. Do it when the config subsystem lands.
+3. **8 anime files failed to probe** in the first pass. Worth looking at what
+   they are before assuming the rate is normal.
 
 ## Current state
 
