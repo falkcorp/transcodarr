@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.1.0 -->
+<!-- version: 3.2.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-03 -->
 
@@ -139,14 +139,41 @@ ACCEPTED item of the 56 fatal-flaw resolutions.
 End-to-end verified on real ffmpeg media: FLAC installed as EAC3 640k, original
 FLAC retained in the trash, video copied untouched, durations identical.
 
+### Phase 3 — real-media run, and the bug it found
+
+A bounded run of 10 audio jobs was executed against the live `anime` library
+with Tdarr still running (the owner chose this over stopping Tdarr). Track
+preservation verified on an installed file:
+
+| | video | audio | subtitles |
+| --- | --- | --- | --- |
+| original | h264, mjpeg | aac, flac | 2 |
+| installed | h264, mjpeg | eac3, eac3 | 2 |
+
+Both audio tracks converted, neither dropped — `-map 0` doing its job. Size grew
+7.08 → 7.16 GB, which `SizePolicy::MayGrow` correctly permits for an audio pass.
+
+**The run found a serious bug that no test caught.** `last_packet_pts_us` used
+`-read_intervals -60`, which returns *nothing* on a long file — so it returned
+`None`, callers fell back to the container header duration, and the
+last-packet-PTS guarantee silently stopped applying. Fixed in PR #41 with an
+absolute seek point. Note that the 10-file run above executed on the pre-fix
+binary, so those validations compared header duration to header duration:
+consistent, and therefore safe, but not the intended guard.
+
+Reproducing it needs a long real file; short fixtures pass either way, and the
+behaviour differs by platform.
+
 ### Still outstanding in Phase 3
 
-1. `TrashCan` retention and reaping (measured from `zfs used`/`usedbysnapshots`,
-   never from file sizes).
-2. Server-side `CommitIntentRepo` writing `commit_intent` rows, so the ledger
-   exists on the server and not only in the agent's journal.
-3. The 200-real-file milestone on U1, with input/output `file_stream` rows
-   diffed for byte-exact track preservation.
+1. The **200-file milestone** proper, with input/output `file_stream` rows
+   diffed for byte-exact track preservation. Ten files ran; the diff harness
+   does not exist yet.
+2. Wire `CommitIntentRepo` into `LocalRunner`, so the server-side ledger is
+   written alongside the agent's journal. The repository exists and is tested;
+   nothing calls it yet.
+3. `TrashRepo` likewise: retention is implemented and tested, but the runner
+   does not yet record a `trash_entry` when the ritual retains an original.
 
 ### Phases 4-7 — not started
 
