@@ -1,6 +1,7 @@
 # file: .github/workflows/ci.yml
-# version: 1.0.2
+# version: 1.0.3
 # guid: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+# last-edited: 2026-08-04
 
 name: Continuous Integration
 
@@ -37,7 +38,7 @@ jobs:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
               with:
-                submodules: recursive
+                  submodules: recursive
                   fetch-depth: 0
 
             - name: Check file changes
@@ -130,13 +131,18 @@ jobs:
 
         steps:
             - name: Generate summary
+              env:
+                  TEST_RUST_RESULT: ${{ needs.test-rust.result }}
+                  LINT_DOCS_RESULT: ${{ needs.lint-docs.result }}
               run: |
-                  echo "# CI Summary" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-                  echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
-                  echo "| Test Rust | ${{ needs.test-rust.result }} |" >> $GITHUB_STEP_SUMMARY
-                  echo "| Lint Docs | ${{ needs.lint-docs.result }} |" >> $GITHUB_STEP_SUMMARY
+                  {
+                      echo "# CI Summary"
+                      echo ""
+                      echo "| Job | Status |"
+                      echo "|-----|--------|"
+                      echo "| Test Rust | ${TEST_RUST_RESULT} |"
+                      echo "| Lint Docs | ${LINT_DOCS_RESULT} |"
+                  } >> "$GITHUB_STEP_SUMMARY"
 
             - name: Check for failures
               if: needs.test-rust.result == 'failure' || needs.lint-docs.result == 'failure'
