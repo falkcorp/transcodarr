@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/job.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: e0947b25-6c31-4fa8-b0d2-58e1a37c92f6
 // last-edited: 2026-08-03
 //! Jobs: creation, reads, and the compare-and-swap transition.
@@ -228,6 +228,30 @@ impl JobRepo {
         let c = self.pool.get()?;
         let mut stmt = c.prepare("SELECT state, COUNT(*) FROM job GROUP BY state")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (raw, n) = row?;
+            out.push((parse_enum("job.state", &raw, JobState::parse)?, n));
+        }
+        Ok(out)
+    }
+
+    /// Open jobs per state within one library, most numerous first.
+    pub fn open_counts_for_library(
+        &self,
+        library_id: &str,
+    ) -> Result<Vec<(JobState, i64)>, StoreError> {
+        let c = self.pool.get()?;
+        let mut stmt = c.prepare(
+            "SELECT state, COUNT(*) n FROM job
+             WHERE library_id = ?1
+               AND state NOT IN
+                 ('Succeeded','Failed','Cancelled','DeadLettered','NeedsOperator')
+             GROUP BY state ORDER BY n DESC",
+        )?;
+        let rows = stmt.query_map([library_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let (raw, n) = row?;

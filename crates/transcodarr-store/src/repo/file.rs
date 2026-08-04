@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/file.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: b6f21e94-70a3-4c85-91d0-4a7e2c38f5b1
 // last-edited: 2026-08-03
 //! Files: discovery upserts, stored probe facts, and evaluation bookkeeping.
@@ -338,6 +338,56 @@ impl FileRepo {
             params![library_id, scan_generation],
             |r| r.get(0),
         )?)
+    }
+
+    /// Per-decision file counts and byte totals for a library.
+    ///
+    /// Aggregated in SQL. The Phase 2 claim is that this answers "what needs
+    /// transcoding across 85 TB" in under a second over ~49,600 rows; fetching
+    /// every row across the crate boundary to sum it in the caller would make
+    /// that false for no benefit — and is exactly the pattern the no-SQL-escapes
+    /// rule exists to prevent.
+    pub fn decision_totals(
+        &self,
+        library_id: &str,
+    ) -> Result<Vec<(Option<String>, i64, i64)>, StoreError> {
+        let c = self.pool.get()?;
+        let mut stmt = c.prepare(
+            "SELECT decision, COUNT(*), COALESCE(SUM(size_bytes), 0) FROM file
+             WHERE library_id = ?1 AND state <> 'Missing'
+             GROUP BY decision ORDER BY 3 DESC",
+        )?;
+        let rows = stmt.query_map([library_id], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Live file count and total bytes for a library.
+    pub fn totals(&self, library_id: &str) -> Result<(i64, i64), StoreError> {
+        let c = self.pool.get()?;
+        Ok(c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM file
+             WHERE library_id = ?1 AND state <> 'Missing'",
+            [library_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// How many files sit in each lifecycle state.
+    pub fn state_counts(&self, library_id: &str) -> Result<Vec<(FileState, i64)>, StoreError> {
+        let c = self.pool.get()?;
+        let mut stmt =
+            c.prepare("SELECT state, COUNT(*) FROM file WHERE library_id = ?1 GROUP BY state")?;
+        let rows = stmt.query_map([library_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (raw, n) = row?;
+            out.push((parse_enum("file.state", &raw, FileState::parse)?, n));
+        }
+        Ok(out)
     }
 
     /// Total live files in a library.

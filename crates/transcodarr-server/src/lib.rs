@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.2.0
+// version: 1.4.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-03
 #![deny(unsafe_code)]
@@ -15,12 +15,19 @@
 //! be re-derived from stored facts without touching a byte of media.
 
 pub mod evaluator;
+pub mod explain;
 pub mod prober;
+pub mod runtime;
 pub mod scanner;
+pub mod summary;
 
 pub use evaluator::{EvalOutcome, Evaluator};
+pub use explain::{Explainer, Explanation};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
+pub use runtime::Runtime;
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
+pub use summary::{LibrarySummary, summarize};
+pub use transcodarr_store::repo::LibraryRecord;
 
 use thiserror::Error;
 
@@ -47,6 +54,17 @@ pub enum ServerError {
         library_id: String,
         /// The path that could not be walked.
         root: String,
+    },
+
+    /// No stored file matches a path.
+    ///
+    /// Distinct from "no work owed": a path nobody has scanned is a different
+    /// question, and answering it as though the file were settled would send an
+    /// operator looking at the policy instead of at the library configuration.
+    #[error("no scanned file at {path}; is it inside an enabled library, and has a scan run?")]
+    UnknownPath {
+        /// The path that matched nothing.
+        path: String,
     },
 
     /// A single file could not be probed.
