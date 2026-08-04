@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.4.0 -->
+<!-- version: 3.5.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-04 -->
 
@@ -57,7 +57,7 @@ Two lessons worth keeping:
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
-| 4 — Protocol, one agent, dispatcher | **In progress.** `CapacityLedger`, `Dispatcher`, `Reconciler`, `ScheduleEngine`, retry/dead-letter/quarantine, the proto semantics and now gRPC codegen with its conversion boundary have all landed. **`AgentSession` and `ConnectClient` — the transport itself — are the remaining work**, and nothing above is connected to anything until they exist. |
+| 4 — Protocol, one agent, dispatcher | **In progress.** Everything below the transport has landed, plus codegen, `AgentRepo` and `Register` served over gRPC. **`Connect` is refused with `Unimplemented`, and `ConnectClient` does not exist** — an agent can register but cannot yet be given work. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
 | 7 — Hardening | Not started. |
@@ -236,29 +236,45 @@ Three things about the codegen are worth knowing before touching it:
   to a different module root on each side and reports every unchanged file as
   deleted.
 
-**Remaining, and it is the whole point of the phase.** `AgentSession` and
-`ConnectClient`. Everything listed above is written, tested, and connected to
-nothing: there is no way for an agent to register, no stream to carry an
-assignment, and no `serve` command. Specifically:
+**`AgentRepo` and `Register` have landed** (PRs #56, #57). No migration was
+needed: `agent`, `agent_mount` and `agent_capability_history` were already in
+`0001_initial.sql`, so nothing here touched the live database on the server.
+Registration is served over a real gRPC channel and covered by ten tests that
+dial a loopback server rather than calling in-process.
 
-1. **`AgentRepo`** — one of the seven repositories deliberately left unwritten,
-   and this is the phase that calls it. `(agent_uid, boot_id, fencing_epoch)`
-   has to survive a server restart, or the fencing rule cannot hold across one.
-   Take the table and column names from `synthesis-decisions.md`.
-2. **`AgentSession`** — the `AgentService` impl. `Register` runs the existing
-   `VersionGate` against `AgentRepo` state and replays `live_intents` against
-   `CommitIntentRepo`; `Connect` owns the bidi stream, the per-agent outbound
-   queue, the heartbeat timeout, and the rule that anything running which the
-   server does not recognise gets killed.
-3. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
+Three decisions in that work are worth not relitigating:
+
+- **A rejection changes nothing in the database.** It is a clean response with a
+  reason, not an error and not a partial write, or being refused becomes a way
+  to overwrite a healthy row. There is a test asserting the row is untouched.
+- **A reinstall takes a new epoch.** Same operator name, new `agent_uid`, so it
+  cannot inherit a work area that is not its own.
+- **`commit_eligible` requires every mount to have passed the rename probe**,
+  not merely one. `RP_UNTESTED` grants nothing.
+
+**Remaining, in dependency order:**
+
+1. **`Connect`** — currently returns `Unimplemented`, deliberately: a stream
+   that accepted assignments with no dispatch loop behind it would hand out work
+   nothing is accounting for. It needs the bidi stream, a per-agent outbound
+   queue, an `AgentTable` the dispatch loop reads, the heartbeat timeout, and
+   the rule that anything running which the server does not recognise gets
+   killed.
+2. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
    `IntentJournal`, runs assignments through the existing `Executor` and
    `CommitRitual`. It must keep its `boot_id` across reconnects, or every
    network blip fences work that is still running fine.
-4. **`serve` and `agent connect`** CLI verbs, and the loop tying
+3. **`serve` and `agent connect`** CLI verbs, and the loop tying
    `ScheduleEngine` → `Dispatcher` → session outbound → `Reconciler`.
-5. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
+4. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
    a `FakeAgent` load test, then 24 concurrent audio jobs sustained on U1. The
    milestone does **not** require the GPU node — Phase 4 is audio-class only.
+
+One caveat on that milestone. It asserts `transcodarr_dispatch_latency_seconds`
+p99 ≤ 100 ms, but `metrics.rs` is names-only with no exporter until Phase 6, so
+the measurement will have to be made in-process against the same clock. That is
+not the artifact the milestone text describes. Say so in the pull request rather
+than letting a later reader assume a Prometheus histogram exists.
 
 Note that `transcodarr-agent` must not acquire a `transcodarr-store`
 dependency: it has to stay copyable to the Windows node without dragging SQLite
@@ -560,11 +576,13 @@ them is expensive.
 
 ## First action for the next session
 
-**`AgentRepo`, then `AgentSession`.** Read § *Phase 4 — in progress* above for
-the ordered list and the three codegen facts that will otherwise cost an hour
-each. The proof to aim for is an in-process integration test over a real tonic
-channel — server task and one agent task, one audio job through register →
-connect → assign → commit → report → reconcile, with a stale-epoch
+**`Connect`, the bidi stream.** Read § *Phase 4 — in progress* above for the
+ordered list and the three codegen facts that will otherwise cost an hour each.
+`crates/transcodarr-server/tests/register.rs` is the pattern to extend — a real
+tonic server on a loopback port, dialled with the generated client.
+
+The proof to aim for is one audio job through register → connect → assign →
+result → `RequestCommit` → `ReportCommit` → reconcile, with a stale-epoch
 `ReportCommit` in the same test rejected and the job left untouched. That is
 provable on the Mac with no media and no server access.
 
