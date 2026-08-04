@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.3.1 -->
+<!-- version: 3.4.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-04 -->
 
@@ -16,7 +16,40 @@ Read in this order:
 3. `docs/design/synthesis-decisions.md` — the binding naming contract. SQL
    tables, Rust types, RPCs, metrics, job states. **Treat as authoritative.**
 
-## Phase status (updated 2026-08-02)
+## Read this first: CI was not running
+
+Until 2026-08-04 **no CI had ever executed in this repository.**
+`.github/workflows/ci.yml` contained a YAML syntax error from the day it was
+written — `fetch-depth: 0` indented deeper than the sibling above it — so every
+run failed in zero seconds at the parse stage and reported only "this run likely
+failed because of a workflow file issue". `fmt`, `clippy`, `test` and
+`build --release` had never run on a runner through all of Phases 2, 3 and 4.
+
+That hid a second defect. `crates/transcodarr-store/migrations/0001_initial.sql`
+— the schema `db.rs` embeds with `include_str!` — **was never committed.** A
+blanket `*.sql` in the maintainer's *global* gitignore matched it, so `main`
+compiled on one machine and nowhere else:
+
+```console
+$ git clone --branch main <repo> /tmp/mainclone && cargo build -p transcodarr-store
+error: couldn't read crates/transcodarr-store/src/../migrations/0001_initial.sql
+```
+
+Both are fixed (PR #53). The repository's own `.gitignore` now negates the
+pattern, where it takes precedence over anyone's home directory. **Treat any
+"verified" claim made before 2026-08-04 as verified on one laptop only** — the
+green triple was real, but it was never independently reproduced.
+
+Two lessons worth keeping:
+
+1. **A workflow that fails to parse looks almost exactly like no workflow.**
+   There is no red X on a file that never became a job. Check that a run
+   produced *jobs*, not just that the branch looks green.
+2. **`git status` will not tell you about a file a global ignore is hiding.**
+   `git check-ignore -v <path>` will, and a clean clone built in a temp
+   directory is the only real proof that a repository is self-contained.
+
+## Phase status (updated 2026-08-04)
 
 | Phase | State |
 | --- | --- |
@@ -24,7 +57,7 @@ Read in this order:
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
-| 4 — Protocol, one agent, dispatcher | Not started. |
+| 4 — Protocol, one agent, dispatcher | **In progress.** `CapacityLedger`, `Dispatcher`, `Reconciler`, `ScheduleEngine`, retry/dead-letter/quarantine, the proto semantics and now gRPC codegen with its conversion boundary have all landed. **`AgentSession` and `ConnectClient` — the transport itself — are the remaining work**, and nothing above is connected to anything until they exist. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
 | 7 — Hardening | Not started. |
@@ -83,7 +116,6 @@ detached under `setsid` on the server, logging to `~/tc/full-probe.log`, at
 ```bash
 ssh jdfalk@172.16.2.30 'cd ~/transcodarr-build && \
   ./target/release/transcodarr admin summary --db ~/tc/tc.db'
-
 ```
 
 At the measured ~2 files/second it needs roughly 7 hours for all 49,600. When it
@@ -176,26 +208,63 @@ behaviour differs by platform.
 3. `TrashRepo` likewise: retention is implemented and tested, but the runner
    does not yet record a `trash_entry` when the ritual retains an original.
 
-### Phase 4 — begun
+### Phase 4 — in progress
 
-`CapacityLedger` is done: all-or-nothing permits, release on leaving the
+**Landed.** `CapacityLedger` (all-or-nothing permits, release on leaving the
 admitted set, rebuild from the database before the first dispatch, separate
-large-file cap. `capability::bucket_key` was landed in Phase 2.
+large-file cap). `Dispatcher` with the two-stage bucket/admission split.
+`Reconciler` on its 5s tick. `ScheduleEngine`. Retry policy, dead-lettering and
+agent quarantine. Metric names as constants. The proto semantics — `VersionGate`
+and the fencing rule — and, as of 2026-08-04, gRPC codegen and the conversion
+boundary (PR #54).
 
-Still to build, in dependency order:
+Three things about the codegen are worth knowing before touching it:
 
-1. **`transcodarr-proto`** — `proto/transcodarr/v1/agent.proto` is fully
-   specified in the architecture document (`rpc Register`, `rpc Connect` bidi
-   stream, `RequestCommit`/`ReportCommit`, `Revoke`), plus `From`/`TryFrom`
-   conversions to core types. Needs `tonic-build` and `protoc` in CI.
-2. **`AgentSession`** and `ConnectClient` — registration with the version gate,
-   `FencingEpoch` bumped only on a new process instance (a stream reconnect
-   resumes it), heartbeat carrying the running set, drain.
-3. **`Dispatcher`** — `AgentTable`, `ReadyIndex`, `ReadyQueue` partitioned by
-   `(class, size_bucket)`, `EligibilityBitset` over `bucket_key`,
-   `AdmissionCheck` for the per-job requirements deliberately kept out of the
-   bucket key, `dispatch_block` rows on refusal.
-4. **`Reconciler`** on a 5s tick, sweeping `CommitIntentRepo::live()`.
+- **`protoc` is not expected on `PATH`.** It comes from
+  `protoc-bin-vendored`, handed to `prost_build::Config` directly rather than
+  exported as `PROTOC`, because `std::env::set_var` is on this repository's
+  clippy disallowed list. A fresh clone builds with nothing installed but a
+  Rust toolchain — verified with `PATH=/usr/bin:/bin`.
+- **`build_transport(false)` is load-bearing.** The generated client would
+  otherwise carry an inherent `connect(dst)` constructor that collides with the
+  client method generated for `rpc Connect` (`E0592`). Build a client with
+  `AgentServiceClient::new(channel)`. Do not "fix" this by renaming the RPC —
+  the schema is the reviewed agreement between both ends.
+- **`buf` guards the contract but is not in the build path.** `buf lint` and a
+  breaking-change check against `main` run in CI. The against-reference must
+  carry `subdir=crates/transcodarr-proto/proto`, or buf names the file relative
+  to a different module root on each side and reports every unchanged file as
+  deleted.
+
+**Remaining, and it is the whole point of the phase.** `AgentSession` and
+`ConnectClient`. Everything listed above is written, tested, and connected to
+nothing: there is no way for an agent to register, no stream to carry an
+assignment, and no `serve` command. Specifically:
+
+1. **`AgentRepo`** — one of the seven repositories deliberately left unwritten,
+   and this is the phase that calls it. `(agent_uid, boot_id, fencing_epoch)`
+   has to survive a server restart, or the fencing rule cannot hold across one.
+   Take the table and column names from `synthesis-decisions.md`.
+2. **`AgentSession`** — the `AgentService` impl. `Register` runs the existing
+   `VersionGate` against `AgentRepo` state and replays `live_intents` against
+   `CommitIntentRepo`; `Connect` owns the bidi stream, the per-agent outbound
+   queue, the heartbeat timeout, and the rule that anything running which the
+   server does not recognise gets killed.
+3. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
+   `IntentJournal`, runs assignments through the existing `Executor` and
+   `CommitRitual`. It must keep its `boot_id` across reconnects, or every
+   network blip fences work that is still running fine.
+4. **`serve` and `agent connect`** CLI verbs, and the loop tying
+   `ScheduleEngine` → `Dispatcher` → session outbound → `Reconciler`.
+5. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
+   a `FakeAgent` load test, then 24 concurrent audio jobs sustained on U1. The
+   milestone does **not** require the GPU node — Phase 4 is audio-class only.
+
+Note that `transcodarr-agent` must not acquire a `transcodarr-store`
+dependency: it has to stay copyable to the Windows node without dragging SQLite
+along. Check with `cargo tree -p transcodarr-agent -i transcodarr-store` rather
+than by eye — a shared proto crate makes a transitive dependency easy to add by
+accident.
 
 ### Phases 5-7 — not started
 
@@ -283,7 +352,6 @@ repo.
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-
 ```
 
 All three must be green. That triple is the M1 exit criterion in the
@@ -348,7 +416,6 @@ key. Work committed there must be pulled to the Mac and pushed from there:
 ```bash
 git remote add unimatrix jdfalk@172.16.2.30:/home/jdfalk/repos/github/jdfalk/transcodarr
 git fetch unimatrix 'refs/heads/BRANCH:refs/remotes/unimatrix/BRANCH'
-
 ```
 
 Working Tdarr scripts on the server, **not in git** — `tdarr-classify.py` is
@@ -360,7 +427,6 @@ before writing the `Evaluator`:
 ~/ai/tdarr/tdarr-ensure-node.py    # per-node worker limits + per-hour schedule (cron */3)
 ~/ai/tdarr/tdarr-watchdog.py       # restarts a dead node agent (cron */10)
 ~/ai/monitoring/prometheus/        # alert rules + exporter inventory
-
 ```
 
 `tdarr-ensure-node.py` **re-arms worker counts every 3 minutes**, so changes
@@ -379,7 +445,6 @@ Each of these cost real time. They are not hypothetical.
    ```bash
    git merge-base --is-ancestor origin/main BRANCH && echo OK || echo "STALE BASE"
    git diff --name-status origin/main BRANCH   # look for unexpected D lines
-
    ```
 
    The fix is to cherry-pick onto current `main`, not to force the branch.
@@ -446,7 +511,6 @@ Revert:
 ```bash
 sed -i 's/^UNI_WORKERS=16/UNI_WORKERS=4/' ~/ai/tdarr/tdarr-ensure-node.py
 python3 ~/ai/tdarr/tdarr-ensure-node.py
-
 ```
 
 Four known Tdarr issues were **deliberately left unfixed** — the owner chose the
@@ -496,11 +560,14 @@ them is expensive.
 
 ## First action for the next session
 
-Phase 1, on the Mac: the workspace split and `transcodarr-core`. It needs no
-media, no server access, and no network. Read
-`distributed-architecture.md` § *Crate and Workspace Layout* and § *Phase 1*
-first — the layout, the module list, and the table mapping every current
-`src/main.rs` function to its new home are all specified there.
+**`AgentRepo`, then `AgentSession`.** Read § *Phase 4 — in progress* above for
+the ordered list and the three codegen facts that will otherwise cost an hour
+each. The proof to aim for is an in-process integration test over a real tonic
+channel — server task and one agent task, one audio job through register →
+connect → assign → commit → report → reconcile, with a stale-epoch
+`ReportCommit` in the same test rejected and the job left untouched. That is
+provable on the Mac with no media and no server access.
 
-Phase 0 preflight must happen on the server before Phase 2 begins, because its
-outcome can change the architecture.
+The real-hardware milestone (24 concurrent audio jobs on U1) comes after, and
+`transcodarr admin summary` on the server will say whether the Phase 2 probe
+run ever finished.
