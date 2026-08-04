@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-03
 #![deny(unsafe_code)]
@@ -15,9 +15,11 @@
 //! be re-derived from stored facts without touching a byte of media.
 
 pub mod evaluator;
+pub mod prober;
 pub mod scanner;
 
 pub use evaluator::{EvalOutcome, Evaluator};
+pub use prober::{ProbeOptions, ProbeOutcome, Prober};
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
 
 use thiserror::Error;
@@ -45,6 +47,19 @@ pub enum ServerError {
         library_id: String,
         /// The path that could not be walked.
         root: String,
+    },
+
+    /// A single file could not be probed.
+    ///
+    /// Carried as an error so one bad file is visible, but the file is marked
+    /// `ProbeFailed` before it is returned: ingestion counts it as progress and
+    /// moves on rather than abandoning the rest of the batch.
+    #[error("probe of {path} failed: {reason}")]
+    ProbeFailed {
+        /// Which file.
+        path: String,
+        /// What went wrong.
+        reason: String,
     },
 
     /// A scan stopped rather than record an implausible number of deletions.
