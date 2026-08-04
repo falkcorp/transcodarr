@@ -27,10 +27,20 @@ use transcodarr_agent::{
 use transcodarr_core::job::JobState;
 use transcodarr_core::plan::JobPaths;
 use transcodarr_core::policy::{self, Policy};
-use transcodarr_store::repo::{FileRepo, JobRepo, LibraryRecord};
+use transcodarr_store::repo::{
+    CommitIntentRepo, FileRepo, JobRepo, LibraryRecord, NewIntent, TrashRepo,
+};
 use transcodarr_store::{ReadPool, WriteLane, Writer};
 
 use crate::ServerError;
+
+/// How long a replaced original is retained by default.
+///
+/// Seven days. Long enough that a bad policy change is noticed and undone from
+/// the trash rather than from backups; short enough that a library's worth of
+/// originals does not accumulate indefinitely. Pool pressure can bring it
+/// forward, but never below `MIN_GRACE_SECONDS`.
+pub const DEFAULT_RETENTION_SECONDS: i64 = 7 * 24 * 3600;
 
 /// How one job turned out.
 #[derive(Debug, Clone)]
@@ -270,6 +280,33 @@ impl LocalRunner {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| job.id.clone()),
         );
+        // The server-side ledger is written *before* the ritual touches
+        // anything. The agent's journal survives a crash of the agent; this row
+        // survives a crash of the connection -- without it, a result lost in
+        // flight after a successful replace makes the next attempt re-encode a
+        // file that has already been replaced.
+        //
+        // A refused grant is a refusal to proceed, not a warning to log past:
+        // idx_commit_intent_live failing means another agent already holds this
+        // path, and installing anyway is the double-replace the index exists to
+        // prevent.
+        let intent_id = format!("{}:{}", job.id, job.attempt);
+        self.writer.submit_blocking(
+            WriteLane::Commit,
+            CommitIntentRepo::grant_op(NewIntent {
+                id: intent_id.clone(),
+                job_id: job.id.clone(),
+                attempt: job.attempt,
+                agent_id: agent_uid(),
+                agent_uid: agent_uid(),
+                fencing_epoch: job.fencing_epoch,
+                source_path: file.canonical_path.clone(),
+                temp_path: temp.to_string_lossy().to_string(),
+                final_path: file.canonical_path.clone(),
+                expected_content_sig: job.expected_content_sig.clone(),
+            }),
+        )?;
+
         let resolution = ritual.commit(&CommitRequest {
             job_id: job.id.clone(),
             attempt: job.attempt,
@@ -280,6 +317,31 @@ impl LocalRunner {
             expected_content_sig: job.expected_content_sig.clone(),
             source_guard: guard,
         })?;
+
+        // Resolve the ledger row whatever happened, so the final path is not
+        // left permanently locked by a live intent nobody will ever finish.
+        self.writer.submit_blocking(
+            WriteLane::Commit,
+            CommitIntentRepo::resolve_op(intent_id, resolution.label().to_string()),
+        )?;
+
+        // Record the retained original only once it really is retained.
+        // Writing the row first would leave a trash_entry pointing at a file
+        // that was never moved, and the reaper would later try to delete the
+        // live original.
+        if let Resolution::Installed { trash_path, .. } = &resolution {
+            self.writer.submit_blocking(
+                WriteLane::Normal,
+                TrashRepo::retain_op(
+                    Some(file.id),
+                    Some(job.id.clone()),
+                    file.canonical_path.clone(),
+                    trash_path.to_string_lossy().to_string(),
+                    file.size_bytes,
+                    DEFAULT_RETENTION_SECONDS,
+                ),
+            )?;
+        }
 
         let bytes_delta = match &resolution {
             Resolution::Installed { output_bytes, .. } => file.size_bytes - *output_bytes as i64,
@@ -345,4 +407,191 @@ fn hostname() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use transcodarr_core::facts::FileFacts;
+    use transcodarr_store::repo::{FileUpsert, LibraryRepo, TrashRepo};
+    use transcodarr_store::{Db, ReadPool, Writer};
+
+    struct Harness {
+        _dir: TempDir,
+        root: TempDir,
+        pool: ReadPool,
+        writer: Arc<Writer>,
+    }
+
+    fn harness() -> Harness {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.db");
+        let db = Db::open_unchecked(&path).unwrap();
+        let pool = ReadPool::open(&path, 4).unwrap();
+        Harness {
+            _dir: dir,
+            root: TempDir::new().unwrap(),
+            pool,
+            writer: Arc::new(Writer::start(db)),
+        }
+    }
+
+    impl Harness {
+        fn library(&self) -> LibraryRecord {
+            let lib = LibraryRecord {
+                id: "tv".into(),
+                name: "tv".into(),
+                root_path: self.root.path().join("lib").to_string_lossy().to_string(),
+                work_dir: self.root.path().join("work").to_string_lossy().to_string(),
+                trash_dir: self.root.path().join("trash").to_string_lossy().to_string(),
+                exclude_globs_json: "[]".into(),
+                enabled: true,
+                scan_parallelism: 4,
+                priority: 0,
+                min_mtime_age_s: 0,
+            };
+            std::fs::create_dir_all(&lib.root_path).unwrap();
+            std::fs::create_dir_all(&lib.trash_dir).unwrap();
+            self.writer
+                .submit_blocking(WriteLane::Normal, LibraryRepo::upsert_op(lib.clone()))
+                .unwrap();
+            lib
+        }
+
+        /// A file with stored facts that owe an audio pass, and a real byte on
+        /// disk so the ritual has something to move.
+        fn seed_job(&self, lib: &LibraryRecord, name: &str) -> i64 {
+            let path = std::path::Path::new(&lib.root_path).join(name);
+            std::fs::write(&path, b"original bytes").unwrap();
+            let id = self
+                .writer
+                .submit_blocking(
+                    WriteLane::Normal,
+                    FileRepo::upsert_op(FileUpsert {
+                        library_id: "tv".into(),
+                        canonical_path: path.to_string_lossy().to_string(),
+                        path_hash: transcodarr_core::stable_hash(name.as_bytes()),
+                        size_bytes: 14,
+                        mtime_unix: 1000,
+                        mtime_ns: 0,
+                        inode: Some(1),
+                        dev: Some(1),
+                        nlink: 1,
+                        scan_generation: 1,
+                    }),
+                )
+                .unwrap()
+                .last_id
+                .unwrap();
+            let facts = FileFacts {
+                container: "matroska".into(),
+                duration_us: Some(60_000_000),
+                size_bytes: 14,
+                audio_codecs: vec!["truehd".into()],
+                audio_track_count: 1,
+                ..FileFacts::default()
+            };
+            let sig = transcodarr_core::facts::content_sig(&facts).0;
+            self.writer
+                .submit_blocking(
+                    WriteLane::Normal,
+                    FileRepo::record_probe_op(
+                        id,
+                        facts,
+                        sig,
+                        transcodarr_core::facts::SizeBucket::Small,
+                        "{}".into(),
+                        "ffprobe".into(),
+                    ),
+                )
+                .unwrap();
+            id
+        }
+
+        fn runner(&self) -> LocalRunner {
+            LocalRunner::new(
+                self.pool.clone(),
+                Arc::clone(&self.writer),
+                // A binary that cannot exist, so no encode is ever attempted.
+                // What is under test is the bookkeeping around the ritual.
+                ExecutorConfig {
+                    ffmpeg: "/nonexistent/ffmpeg".into(),
+                    ffprobe: "/nonexistent/ffprobe".into(),
+                    timeout: None,
+                },
+            )
+        }
+    }
+
+    /// A dry run must not create a ledger row. Granting an intent for work that
+    /// will never happen leaves the final path locked by a live intent nobody
+    /// resolves.
+    #[test]
+    fn a_dry_run_grants_no_commit_intent() {
+        let h = harness();
+        let lib = h.library();
+        h.seed_job(&lib, "a.mkv");
+        crate::Evaluator::new(
+            h.pool.clone(),
+            Arc::clone(&h.writer),
+            transcodarr_core::facts::SizeThresholds::default(),
+        )
+        .evaluate_library("tv", &policy::default_space_saver())
+        .unwrap();
+
+        let out = h
+            .runner()
+            .run_library(&lib, &policy::default_space_saver(), 5, true, None)
+            .unwrap();
+        assert_eq!(out.attempted, 1);
+
+        let intents = transcodarr_store::repo::CommitIntentRepo::new(h.pool.clone());
+        assert!(
+            intents.live().unwrap().is_empty(),
+            "a dry run must leave no live intent"
+        );
+    }
+
+    /// An encode that never ran leaves the library untouched and the ledger
+    /// clean -- nothing was granted, so nothing needs resolving.
+    #[test]
+    fn a_failed_encode_leaves_no_live_intent_and_no_trash_entry() {
+        let h = harness();
+        let lib = h.library();
+        let file_id = h.seed_job(&lib, "a.mkv");
+        crate::Evaluator::new(
+            h.pool.clone(),
+            Arc::clone(&h.writer),
+            transcodarr_core::facts::SizeThresholds::default(),
+        )
+        .evaluate_library("tv", &policy::default_space_saver())
+        .unwrap();
+
+        let out = h
+            .runner()
+            .run_library(&lib, &policy::default_space_saver(), 5, false, None)
+            .unwrap();
+        assert_eq!(out.attempted, 1);
+        assert_eq!(out.installed, 0);
+
+        let intents = transcodarr_store::repo::CommitIntentRepo::new(h.pool.clone());
+        assert!(
+            intents.live().unwrap().is_empty(),
+            "a failed encode must not leave the path locked"
+        );
+        assert_eq!(
+            TrashRepo::new(h.pool.clone()).retained_totals().unwrap().0,
+            0,
+            "nothing was replaced, so nothing may be retained"
+        );
+
+        // The original is exactly where it was.
+        let rec = FileRepo::new(h.pool.clone()).get(file_id).unwrap();
+        assert!(std::path::Path::new(&rec.canonical_path).exists());
+        assert_eq!(
+            std::fs::read(&rec.canonical_path).unwrap(),
+            b"original bytes"
+        );
+    }
 }
