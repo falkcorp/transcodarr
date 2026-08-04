@@ -1,12 +1,12 @@
 <!-- file: .github/copilot-instructions.md -->
-<!-- version: 2.6.0 -->
+<!-- version: 2.6.1 -->
 <!-- guid: 4d5e6f7a-8b9c-0d1e-2f3a-4b5c6d7e8f9a -->
-<!-- last-edited: 2026-07-31 -->
+<!-- last-edited: 2026-08-04 -->
 
 # transcodarr — Additional Context
 
 Org-wide coding standards (file headers, language rules, commit format) are at
-**https://github.com/falkcorp/.github** and apply automatically to this repo.
+**<https://github.com/falkcorp/.github>** and apply automatically to this repo.
 
 For full project context: **CLAUDE.md** at the repo root.
 
@@ -31,7 +31,6 @@ entry point at `src/main.rs`.
 - Requires `ffmpeg` and `ffprobe` on `PATH` at runtime — do not shell out to any other media tools.
 - Optional `json` feature gate enables `serde`/`serde_json` for JSON output mode.
 - Minimum Rust edition: 2021.
-
 
 ## 📝 Changelog & TODO — Use the Fragment System (MANDATORY)
 

@@ -1,7 +1,7 @@
 <!-- file: docs/design/PHASE0-RESULTS.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.0.1 -->
 <!-- guid: c8f45b71-9e23-40da-b6c8-5a17e02f9364 -->
-<!-- last-edited: 2026-08-02 -->
+<!-- last-edited: 2026-08-04 -->
 
 # Phase 0 — preflight results
 
@@ -74,7 +74,7 @@ is commit-eligible and discovering otherwise in production.
 Run, on the Windows node, as the user the Tdarr node service runs as, against
 the library path it actually writes to:
 
-```
+```bash
 transcodarr admin diagnose --preflight --work-dir <library path> --db-dir <temp>
 ```
 

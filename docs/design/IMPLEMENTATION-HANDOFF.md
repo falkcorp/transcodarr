@@ -1,7 +1,7 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.3.0 -->
+<!-- version: 3.3.1 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
-<!-- last-edited: 2026-08-03 -->
+<!-- last-edited: 2026-08-04 -->
 
 # Implementation handoff — transcodarr
 
@@ -83,6 +83,7 @@ detached under `setsid` on the server, logging to `~/tc/full-probe.log`, at
 ```bash
 ssh jdfalk@172.16.2.30 'cd ~/transcodarr-build && \
   ./target/release/transcodarr admin summary --db ~/tc/tc.db'
+
 ```
 
 At the measured ~2 files/second it needs roughly 7 hours for all 49,600. When it
@@ -282,6 +283,7 @@ repo.
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+
 ```
 
 All three must be green. That triple is the M1 exit criterion in the
@@ -346,17 +348,19 @@ key. Work committed there must be pulled to the Mac and pushed from there:
 ```bash
 git remote add unimatrix jdfalk@172.16.2.30:/home/jdfalk/repos/github/jdfalk/transcodarr
 git fetch unimatrix 'refs/heads/BRANCH:refs/remotes/unimatrix/BRANCH'
+
 ```
 
 Working Tdarr scripts on the server, **not in git** — `tdarr-classify.py` is
 effectively the policy engine transcodarr is replacing, and is worth reading
 before writing the `Evaluator`:
 
-```
+```text
 ~/ai/tdarr/tdarr-classify.py       # queue state from STORED probe data, no rescan
 ~/ai/tdarr/tdarr-ensure-node.py    # per-node worker limits + per-hour schedule (cron */3)
 ~/ai/tdarr/tdarr-watchdog.py       # restarts a dead node agent (cron */10)
 ~/ai/monitoring/prometheus/        # alert rules + exporter inventory
+
 ```
 
 `tdarr-ensure-node.py` **re-arms worker counts every 3 minutes**, so changes
@@ -371,10 +375,13 @@ Each of these cost real time. They are not hypothetical.
    would have reverted two commits' worth of work — deleting `.standards`,
    `CLAUDE.md`, `AGENTS.md`, `changelog.d/`, `todo.d/`, and 37 `.github/` files.
    **Always check ancestry before pushing a branch authored elsewhere:**
+
    ```bash
    git merge-base --is-ancestor origin/main BRANCH && echo OK || echo "STALE BASE"
    git diff --name-status origin/main BRANCH   # look for unexpected D lines
+
    ```
+
    The fix is to cherry-pick onto current `main`, not to force the branch.
 2. **Clippy fails open.** A single unknown key makes clippy reject its *entire*
    config and refuse to run — indistinguishable from "no warnings" if you only
@@ -439,6 +446,7 @@ Revert:
 ```bash
 sed -i 's/^UNI_WORKERS=16/UNI_WORKERS=4/' ~/ai/tdarr/tdarr-ensure-node.py
 python3 ~/ai/tdarr/tdarr-ensure-node.py
+
 ```
 
 Four known Tdarr issues were **deliberately left unfixed** — the owner chose the
