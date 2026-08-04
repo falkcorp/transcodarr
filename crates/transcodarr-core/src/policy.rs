@@ -1,5 +1,5 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
 // last-edited: 2026-08-03
 //! The rules engine, and `Default Space Saver`.
@@ -21,7 +21,8 @@ use crate::capability::{
 };
 use crate::facts::{FileFacts, SizeThresholds, content_sig, size_bucket_for};
 use crate::job::{JobClass, JobSpec};
-use crate::plan::{BitDepth, EncoderId};
+use crate::plan::{BitDepth, EncodePlan, EncoderId};
+use crate::validate::{SizePolicy, ValidationSpec};
 
 /// Predicates selecting which files a rule applies to. All present fields must
 /// match — an empty `Match` matches everything, which is how a catch-all
@@ -228,6 +229,93 @@ pub struct RuleTrace {
     pub matched: bool,
     /// What it contributed.
     pub effect: String,
+}
+
+/// Turn a decision into the encode it describes.
+///
+/// `None` when the decision owes no encode. The audio stage is emitted for
+/// `Audio` *and* `AudioThenVideo`, because the video half of a two-stage
+/// decision is a separate follow-up job with its own row — trying to express
+/// both in one ffmpeg invocation is what makes a partial failure unrecoverable.
+pub fn encode_plan_for(d: &Decision, _facts: &FileFacts) -> Option<EncodePlan> {
+    match d.class {
+        DecisionClass::None | DecisionClass::Quarantined => None,
+
+        DecisionClass::Audio | DecisionClass::AudioThenVideo => {
+            let audio = d.audio.as_ref()?;
+            Some(EncodePlan {
+                // Video is copied, not re-encoded. An audio pass that touches
+                // video would re-encode every file in the library for a change
+                // to its soundtrack.
+                video_codec: EncoderId::Copy,
+                audio_codec: audio.codec,
+                pix_fmt: None,
+                extra_args: vec![
+                    "-b:a".to_string(),
+                    audio.bitrate.clone(),
+                    // Map every stream. A bare `-c:a eac3` silently keeps only
+                    // the default track and drops the rest -- measured, and the
+                    // single easiest way to quietly destroy a library.
+                    "-map".to_string(),
+                    "0".to_string(),
+                ],
+            })
+        }
+
+        DecisionClass::Video => {
+            let video = d.video.as_ref()?;
+            let encoder = *video.encoder_preference.first()?;
+            Some(EncodePlan {
+                video_codec: encoder,
+                // Audio is copied in a video pass. If the audio also needed
+                // work, the decision would have been AudioThenVideo.
+                audio_codec: EncoderId::Copy,
+                // Bit depth is preserved, never upconverted: libx265 wants
+                // yuv420p10le and NVENC wants p010le, and the wrong one errors
+                // the job outright.
+                pix_fmt: crate::plan::pix_fmt_for(encoder, video.source_depth),
+                extra_args: vec![
+                    "-crf".to_string(),
+                    video.quality.to_string(),
+                    "-map".to_string(),
+                    "0".to_string(),
+                ],
+            })
+        }
+    }
+}
+
+/// Build the validation contract for an output, from the source's facts.
+///
+/// Two production rules are encoded here and must not be softened:
+///
+/// - **Tolerance is asymmetric and absolutely capped at `min(0.5%, 5s)`.** A
+///   percentage alone permits a 40-minute loss on a three-hour film, so the
+///   absolute cap is what actually protects the media.
+/// - **An audio-only pass may grow the file.** Re-encoding Opus or TrueHD to
+///   EAC3 640k legitimately produces a larger output, and requiring shrinkage
+///   would reject every audio job and strand the video stage meant to follow.
+pub fn validation_spec_for(facts: &FileFacts, d: &Decision) -> ValidationSpec {
+    let source_duration_us = facts.duration_us.unwrap_or(0);
+    let max_shorter_us = std::cmp::min(source_duration_us / 200, 5_000_000);
+
+    let size_policy = match d.class {
+        DecisionClass::Audio | DecisionClass::AudioThenVideo => SizePolicy::MayGrow,
+        // A video pass that saved nothing did work for no reason; 2% is low
+        // enough not to reject a legitimately marginal encode.
+        _ => SizePolicy::RequireSmaller { min_shrink: 0.02 },
+    };
+
+    ValidationSpec {
+        source_duration_us,
+        max_shorter_us,
+        // Encoders round up by a frame or two; they do not invent minutes.
+        max_longer_us: 2_000_000,
+        expected_audio_streams: facts.audio_track_count,
+        expected_subtitle_streams: facts.subtitle_track_count,
+        source_bytes: facts.size_bytes,
+        size_policy,
+    }
 }
 
 /// A content-addressed version of a policy.
@@ -761,5 +849,168 @@ mod tests {
     #[test]
     fn an_empty_match_is_a_catch_all() {
         assert!(Match::default().matches(&facts("h264", BitDepth::Eight, &[], 1)));
+    }
+}
+
+#[cfg(test)]
+mod plan_builder_tests {
+    use super::*;
+
+    fn facts() -> FileFacts {
+        FileFacts {
+            container: "matroska".into(),
+            duration_us: Some(3_600_000_000),
+            size_bytes: 8_000_000_000,
+            video_codec: Some("h264".into()),
+            video_bit_depth: Some(BitDepth::Ten),
+            audio_codecs: vec!["truehd".into()],
+            audio_track_count: 3,
+            subtitle_track_count: 5,
+            ..FileFacts::default()
+        }
+    }
+
+    /// A bare `-c:a eac3` silently keeps only the default track and drops the
+    /// rest. Measured, and the single easiest way to quietly destroy a library.
+    #[test]
+    fn an_audio_plan_maps_every_stream_and_copies_video() {
+        let f = facts();
+        let d = evaluate(&f, &default_space_saver());
+        let plan = encode_plan_for(&d, &f).expect("audio work is owed");
+
+        assert_eq!(
+            plan.video_codec,
+            EncoderId::Copy,
+            "video must not be touched"
+        );
+        assert!(
+            plan.extra_args
+                .windows(2)
+                .any(|w| w[0] == "-map" && w[1] == "0"),
+            "every stream must be mapped: {:?}",
+            plan.extra_args
+        );
+    }
+
+    /// Nothing owed means no encode. Emitting one anyway would re-encode the
+    /// whole library for no reason.
+    #[test]
+    fn a_settled_file_yields_no_plan() {
+        let f = FileFacts {
+            audio_codecs: vec!["eac3".into()],
+            video_codec: Some("hevc".into()),
+            ..facts()
+        };
+        let d = evaluate(&f, &default_space_saver());
+        if matches!(d.class, DecisionClass::None) {
+            assert!(encode_plan_for(&d, &f).is_none());
+        }
+    }
+
+    /// DV and object audio are excluded from all work. A plan here would
+    /// re-encode a title that must never be re-encoded.
+    #[test]
+    fn a_quarantined_decision_yields_no_plan() {
+        let d = Decision {
+            class: DecisionClass::Quarantined,
+            audio: None,
+            video: None,
+            reason: "dolby vision".into(),
+        };
+        assert!(encode_plan_for(&d, &facts()).is_none());
+    }
+
+    /// A percentage alone permits a 40-minute loss on a three-hour film. The
+    /// absolute cap is what actually protects the media.
+    #[test]
+    fn the_duration_tolerance_is_capped_at_five_seconds() {
+        let f = facts(); // one hour
+        let d = evaluate(&f, &default_space_saver());
+        let spec = validation_spec_for(&f, &d);
+
+        // 0.5% of an hour is 18s, so the 5s cap must bind.
+        assert_eq!(spec.max_shorter_us, 5_000_000);
+    }
+
+    /// ...but on a short file the percentage is tighter than the cap, and it
+    /// is the percentage that must bind.
+    #[test]
+    fn the_tolerance_is_a_percentage_on_short_files() {
+        let f = FileFacts {
+            duration_us: Some(600_000_000), // ten minutes
+            ..facts()
+        };
+        let d = evaluate(&f, &default_space_saver());
+        let spec = validation_spec_for(&f, &d);
+        assert_eq!(spec.max_shorter_us, 3_000_000, "0.5% of ten minutes");
+    }
+
+    /// Re-encoding TrueHD or Opus to EAC3 640k legitimately grows the file.
+    /// Requiring shrinkage would reject every audio job and strand the video
+    /// stage meant to follow it.
+    #[test]
+    fn an_audio_pass_is_allowed_to_grow_the_file() {
+        let f = facts();
+        let d = evaluate(&f, &default_space_saver());
+        let spec = validation_spec_for(&f, &d);
+        assert!(
+            matches!(spec.size_policy, SizePolicy::MayGrow),
+            "got {:?}",
+            spec.size_policy
+        );
+    }
+
+    #[test]
+    fn a_video_pass_must_actually_save_space() {
+        let d = Decision {
+            class: DecisionClass::Video,
+            audio: None,
+            video: Some(VideoPlan {
+                encoder_preference: vec![EncoderId::Libx265],
+                quality: 22,
+                source_depth: BitDepth::Ten,
+            }),
+            reason: "video".into(),
+        };
+        let spec = validation_spec_for(&facts(), &d);
+        assert!(matches!(
+            spec.size_policy,
+            SizePolicy::RequireSmaller { .. }
+        ));
+    }
+
+    /// Every audio and subtitle track must survive; the spec is what carries
+    /// that expectation to the validator.
+    #[test]
+    fn the_spec_demands_every_track_survives() {
+        let f = facts();
+        let d = evaluate(&f, &default_space_saver());
+        let spec = validation_spec_for(&f, &d);
+        assert_eq!(spec.expected_audio_streams, 3);
+        assert_eq!(spec.expected_subtitle_streams, 5);
+    }
+
+    /// libx265 wants yuv420p10le and NVENC wants p010le; the wrong one errors
+    /// the job. Never upconvert 8-bit.
+    #[test]
+    fn a_video_plan_preserves_source_bit_depth() {
+        for depth in [BitDepth::Eight, BitDepth::Ten] {
+            let d = Decision {
+                class: DecisionClass::Video,
+                audio: None,
+                video: Some(VideoPlan {
+                    encoder_preference: vec![EncoderId::Libx265],
+                    quality: 22,
+                    source_depth: depth,
+                }),
+                reason: "video".into(),
+            };
+            let plan = encode_plan_for(&d, &facts()).unwrap();
+            assert_eq!(
+                plan.pix_fmt,
+                crate::plan::pix_fmt_for(EncoderId::Libx265, depth),
+                "depth {depth:?} must round-trip into the pixel format"
+            );
+        }
     }
 }
