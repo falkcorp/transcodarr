@@ -92,6 +92,7 @@ impl LocalRunner {
         policy: &Policy,
         limit: u32,
         dry_run: bool,
+        only_class: Option<transcodarr_core::job::JobClass>,
     ) -> Result<RunOutcome, ServerError> {
         let work = WorkArea::open(
             std::path::Path::new(&library.work_dir),
@@ -107,9 +108,24 @@ impl LocalRunner {
         }
 
         let mut out = RunOutcome::default();
-        for job in self.jobs.in_state(JobState::Pending, limit)? {
+        // Over-fetch, then filter: the queue is priority-ordered across every
+        // class, so asking for `limit` rows and then filtering would return
+        // almost nothing whenever the head of the queue is a class the caller
+        // did not ask for.
+        let pool = self
+            .jobs
+            .in_state(JobState::Pending, limit.saturating_mul(50).max(limit))?;
+        for job in pool.into_iter().take_while(|_| true) {
             if job.library_id != library.id {
                 continue;
+            }
+            if let Some(want) = only_class {
+                if job.class != want {
+                    continue;
+                }
+            }
+            if out.attempted >= limit as i64 {
+                break;
             }
             out.attempted += 1;
             match self.run_one(&job, library, policy, &work, &ritual, dry_run) {

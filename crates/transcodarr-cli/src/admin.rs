@@ -135,6 +135,9 @@ pub enum AdminCommand {
         /// Print the ffmpeg command for each job without running anything.
         #[arg(long)]
         dry_run: bool,
+        /// Only run jobs of this class: audio, videocpu, videogpu.
+        #[arg(long)]
+        class: Option<String>,
     },
 
     /// What needs transcoding, by decision.
@@ -215,7 +218,8 @@ pub fn run(cmd: AdminCommand) -> Result<()> {
             library,
             limit,
             dry_run,
-        } => run_jobs(db, library, limit, dry_run),
+            class,
+        } => run_jobs(db, library, limit, dry_run, class),
 
         AdminCommand::Summary { db, library } => summary(db, library),
     }
@@ -379,7 +383,20 @@ fn explain(db: PathBuf, path: String) -> Result<()> {
     Ok(())
 }
 
-fn run_jobs(db: PathBuf, library: Option<String>, limit: u32, dry_run: bool) -> Result<()> {
+fn run_jobs(
+    db: PathBuf,
+    library: Option<String>,
+    limit: u32,
+    dry_run: bool,
+    class: Option<String>,
+) -> Result<()> {
+    let only_class = match class.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            transcodarr_core::job::JobClass::parse(&normalise_class(raw))
+                .ok_or_else(|| anyhow::anyhow!("unknown job class '{raw}'"))?,
+        ),
+    };
     let store = open_store(&db)?;
     let policy = policy::default_space_saver();
     let runner = transcodarr_server::LocalRunner::new(
@@ -389,7 +406,7 @@ fn run_jobs(db: PathBuf, library: Option<String>, limit: u32, dry_run: bool) -> 
     );
 
     for lib in selected(&store, library)? {
-        let out = runner.run_library(&lib, &policy, limit, dry_run)?;
+        let out = runner.run_library(&lib, &policy, limit, dry_run, only_class)?;
         println!(
             "{}: {} attempted, {} installed, {} rejected, {} failed",
             lib.id, out.attempted, out.installed, out.rejected, out.failed
@@ -416,6 +433,19 @@ fn run_jobs(db: PathBuf, library: Option<String>, limit: u32, dry_run: bool) -> 
         }
     }
     Ok(())
+}
+
+/// Accept `audio`, `videocpu`, `VideoGpu` and so on. The canonical spellings
+/// are `CamelCase`, which is not what anyone types at a shell.
+fn normalise_class(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "audio" => "Audio".into(),
+        "videocpu" | "video-cpu" | "cpu" => "VideoCpu".into(),
+        "videogpu" | "video-gpu" | "gpu" => "VideoGpu".into(),
+        "probe" => "Probe".into(),
+        "verify" => "Verify".into(),
+        other => other.to_string(),
+    }
 }
 
 fn summary(db: PathBuf, library: Option<String>) -> Result<()> {
