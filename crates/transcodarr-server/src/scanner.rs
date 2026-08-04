@@ -281,7 +281,10 @@ impl Scanner {
             // which would queue the same bytes for transcoding twice.
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| !self.is_excluded_dir(e));
+            .filter_entry(|e| {
+                !self.is_excluded_dir(e)
+                    && !(e.file_type().is_dir() && self.is_own_area(library, e.path()))
+            });
 
         for entry in walker {
             let entry = match entry {
@@ -361,6 +364,28 @@ impl Scanner {
 
         drain(&mut pending)?;
         Ok(counts)
+    }
+
+    /// Whether a directory is the library's own work or trash area.
+    ///
+    /// Matched by *path*, not by name. The default name list cannot help here:
+    /// an operator who sets `work_dir` to `.transcodarr-work` — or anywhere
+    /// else inside the library root — gets a directory that is not called
+    /// `work`, and discovery would then walk into it and enqueue transcodarr's
+    /// own staged output and retained originals as source material. The staged
+    /// output is a *partial* file, so that is not merely wasteful: it is
+    /// transcoding a truncated file on purpose.
+    fn is_own_area(&self, library: &LibraryRecord, path: &Path) -> bool {
+        for dir in [&library.work_dir, &library.trash_dir] {
+            if dir.is_empty() {
+                continue;
+            }
+            let dir = Path::new(dir);
+            if path == dir || path.starts_with(dir) {
+                return true;
+            }
+        }
+        false
     }
 
     fn is_excluded_dir(&self, entry: &walkdir::DirEntry) -> bool {
@@ -616,6 +641,57 @@ mod tests {
             .scan_library(&lib, "full")
             .unwrap();
         assert_eq!(out.files_seen, 1, "only the real file is media to us");
+    }
+
+    /// The default name list cannot save an operator who sets `work_dir` to
+    /// something not called `work`. Discovery would then enqueue transcodarr's
+    /// own staged output -- which is a *partial* file -- as source material.
+    #[test]
+    fn the_libraries_own_work_and_trash_areas_are_never_scanned() {
+        let h = harness();
+        let mut lib = h.library();
+        lib.work_dir = h
+            .root
+            .path()
+            .join(".transcodarr-work")
+            .to_string_lossy()
+            .to_string();
+        lib.trash_dir = h
+            .root
+            .path()
+            .join(".transcodarr-trash")
+            .to_string_lossy()
+            .to_string();
+        h.writer
+            .submit_blocking(WriteLane::Normal, LibraryRepo::upsert_op(lib.clone()))
+            .unwrap();
+
+        h.touch("real.mkv", 10);
+        h.touch(".transcodarr-work/job1.0.partial.mkv", 10);
+        h.touch(".transcodarr-trash/replaced.mkv", 10);
+
+        let out = h
+            .scanner(ScanOptions::default())
+            .scan_library(&lib, "full")
+            .unwrap();
+        assert_eq!(
+            out.files_seen, 1,
+            "only the real file; our own staged output and retained originals must be invisible"
+        );
+    }
+
+    /// A work area outside the library root is the normal case and must not
+    /// affect the walk at all.
+    #[test]
+    fn a_work_area_outside_the_library_changes_nothing() {
+        let h = harness();
+        let lib = h.install_library();
+        h.touch("a.mkv", 10);
+        let out = h
+            .scanner(ScanOptions::default())
+            .scan_library(&lib, "full")
+            .unwrap();
+        assert_eq!(out.files_seen, 1);
     }
 
     /// A file still being written has a recent mtime. Recording it races the
