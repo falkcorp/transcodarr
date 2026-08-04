@@ -1,7 +1,7 @@
 # file: crates/transcodarr-server/Cargo.toml
-# version: 1.1.0
+# version: 1.2.0
 # guid: 3f6d1b84-52e0-4c97-a83b-9d16e40c7a25
-# last-edited: 2026-08-03
+# last-edited: 2026-08-04
 
 [package]
 name = "transcodarr-server"
@@ -19,11 +19,17 @@ homepage.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 transcodarr-agent = { path = "../transcodarr-agent" }
 transcodarr-core = { path = "../transcodarr-core" }
+transcodarr-proto = { path = "../transcodarr-proto" }
 transcodarr-store = { path = "../transcodarr-store" }
 walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = { workspace = true, features = ["net"] }

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.5.0
+// version: 1.6.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
-// last-edited: 2026-08-03
+// last-edited: 2026-08-04
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! transcodarr orchestration.
@@ -26,6 +26,7 @@ pub mod runner;
 pub mod runtime;
 pub mod scanner;
 pub mod schedule;
+pub mod session;
 pub mod summary;
 
 pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
@@ -39,6 +40,7 @@ pub use runner::{JobOutcome, LocalRunner, RunOutcome};
 pub use runtime::Runtime;
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
 pub use schedule::{EffectiveLimits, Override, ScheduleEngine, ScheduleWindow};
+pub use session::AgentSession;
 pub use summary::{LibrarySummary, summarize};
 pub use transcodarr_agent::ExecutorConfig;
 pub use transcodarr_store::repo::LibraryRecord;

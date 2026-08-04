@@ -44,6 +44,7 @@ tonic-build = "0.12"
 # laptop and fails on a fresh CI image.
 protoc-bin-vendored = "3"
 prost-build = "0.13"
+tokio-stream = "0.1"
 axum = "0.7"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
 rust-embed = { version = "8" }
