@@ -15,6 +15,7 @@
 //! be re-derived from stored facts without touching a byte of media.
 
 pub mod capacity;
+pub mod dispatch;
 pub mod evaluator;
 pub mod explain;
 pub mod prober;
@@ -24,6 +25,7 @@ pub mod scanner;
 pub mod summary;
 
 pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
+pub use dispatch::{AgentEntry, Assignment, Blocked, DispatchRound, Dispatcher, QueuedJob};
 pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
