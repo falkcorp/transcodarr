@@ -1,7 +1,7 @@
 # file: crates/transcodarr-proto/Cargo.toml
-# version: 1.0.0
+# version: 1.1.0
 # guid: 5a71e0c4-836b-4d92-a017-4f2c95e18b60
-# last-edited: 2026-08-03
+# last-edited: 2026-08-04
 
 [package]
 name = "transcodarr-proto"
@@ -13,11 +13,17 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-# No tonic or prost yet, and deliberately so -- see the crate documentation.
-# The wire schema lives in proto/, the semantics live here, and codegen is added
-# by whoever wires the transport.
 [dependencies]
+prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
+
+[build-dependencies]
+# protoc comes from the dependency tree rather than the machine -- see the note
+# in the workspace manifest.
+prost-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+tonic-build = { workspace = true }

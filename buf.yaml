@@ -1,0 +1,58 @@
+# file: buf.yaml
+# version: 1.0.0
+# guid: 7e1c93a4-58d0-4b62-9fa7-2c48e01d6b35
+# last-edited: 2026-08-04
+
+# buf guards the wire contract; it is deliberately NOT in the build path.
+#
+# Codegen stays cargo-native (`crates/transcodarr-proto/build.rs`, with protoc
+# carried by `protoc-bin-vendored`), so a fresh clone builds with nothing
+# installed but a Rust toolchain. This repository has already been bitten once
+# by a build that only worked on the machine it was authored on; adding two
+# plugin binaries to the critical path invites the same failure.
+#
+# What buf is here for is the thing cargo cannot check: whether a change to
+# agent.proto is compatible with the agents already running it. Server and
+# agents are upgraded independently -- a rolling upgrade of both under load is
+# Phase 7's milestone -- so a renumbered field is a production incident, not a
+# review comment.
+version: v2
+
+modules:
+    - path: crates/transcodarr-proto/proto
+
+lint:
+    use:
+        - STANDARD
+    except:
+        # The bidi `Connect` stream carries oneof envelopes, so its request and
+        # response are `AgentMessage`/`ServerMessage` rather than
+        # `ConnectRequest`/`ConnectResponse`. That is the normal shape for a
+        # multiplexed stream, and naming them after the single RPC that carries
+        # them would describe them worse.
+        - RPC_REQUEST_STANDARD_NAME
+        - RPC_RESPONSE_STANDARD_NAME
+
+        # The enum values are short-prefixed (`DS_VERIFIED_OK`, not
+        # `DECODER_STATUS_VERIFIED_OK`) and the zero values are meaningful
+        # rather than `_UNSPECIFIED`. Both are deliberate and both are mirrored
+        # verbatim in docs/design/distributed-architecture.md, which is the
+        # reviewed contract of record.
+        #
+        # The zero-value rule exists because proto3 decodes an unknown enum
+        # number to zero, so zero should mean "a value this build does not
+        # know". This schema addresses that hazard by making the *safe* value
+        # the zero value instead: `DS_UNTESTED` and `RP_UNTESTED` are the ones
+        # that grant nothing. An unknown verdict from a newer peer therefore
+        # decays to "not proof of anything" rather than to a capability claim,
+        # and `DecoderStatus::satisfies_hardware_requirement` returns false for
+        # it. Renaming would be conventional; it would not be safer.
+        - ENUM_VALUE_PREFIX
+        - ENUM_ZERO_VALUE_SUFFIX
+
+breaking:
+    # Every breaking rule stays on. This is the half of buf that earns its
+    # place: it is the only check that can tell a field renumbered in a pull
+    # request from one that was always that way.
+    use:
+        - FILE

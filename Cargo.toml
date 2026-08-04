@@ -1,8 +1,8 @@
 [workspace]
 # file: Cargo.toml
-# version: 1.0.0
+# version: 1.1.0
 # guid: 4f8b1d27-3a60-4c95-b1e8-7d02a6f39c14
-# last-edited: 2026-08-01
+# last-edited: 2026-08-04
 resolver = "2"
 members = ["crates/*"]
 
@@ -37,6 +37,13 @@ tokio = { version = "1", features = [
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 tonic-build = "0.12"
+# The generated code is built with a protoc carried in the dependency tree
+# rather than one installed on the machine. prost-build stopped bundling protoc
+# at 0.11, and requiring it out-of-band makes the build depend on how a runner
+# happens to be provisioned -- which is the sort of thing that works on a
+# laptop and fails on a fresh CI image.
+protoc-bin-vendored = "3"
+prost-build = "0.13"
 axum = "0.7"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip"] }
 rust-embed = { version = "8" }
