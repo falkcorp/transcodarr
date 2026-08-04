@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/lib.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: b2947c0e-5d81-4f36-a7b0-6e13df852a94
 // last-edited: 2026-08-02
 #![deny(unsafe_code)]
@@ -11,11 +11,13 @@
 //! dragging SQLite along with it.
 
 pub mod commit;
+pub mod executor;
 pub mod journal;
 pub mod preflight;
 pub mod workarea;
 
 pub use commit::{CommitRequest, CommitRitual, Resolution, SourceGuard};
+pub use executor::{Execution, Executor, ExecutorConfig, Progress, ProgressTailer};
 pub use journal::{IntentJournal, IntentPhase, IntentRecord};
 pub use workarea::WorkArea;
 
@@ -73,6 +75,24 @@ pub enum AgentError {
         work_area: String,
         /// The destination directory.
         destination: String,
+    },
+
+    /// A child process could not be started or waited on.
+    #[error("running {program}: {source}")]
+    Execute {
+        /// Which binary.
+        program: String,
+        /// Underlying error.
+        source: std::io::Error,
+    },
+
+    /// An output could not be probed.
+    #[error("probing {path}: {reason}")]
+    Probe {
+        /// Which file.
+        path: String,
+        /// What went wrong.
+        reason: String,
     },
 
     /// The platform cannot report which device a path is on.
