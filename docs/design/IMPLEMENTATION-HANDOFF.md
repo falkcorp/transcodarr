@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.2.0 -->
+<!-- version: 3.3.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-03 -->
 
@@ -175,16 +175,40 @@ behaviour differs by platform.
 3. `TrashRepo` likewise: retention is implemented and tested, but the runner
    does not yet record a `trash_entry` when the ritual retains an original.
 
-### Phases 4-7 — not started
+### Phase 4 — begun
 
-4. Protocol, one agent, dispatcher (audio class only).
+`CapacityLedger` is done: all-or-nothing permits, release on leaving the
+admitted set, rebuild from the database before the first dispatch, separate
+large-file cap. `capability::bucket_key` was landed in Phase 2.
+
+Still to build, in dependency order:
+
+1. **`transcodarr-proto`** — `proto/transcodarr/v1/agent.proto` is fully
+   specified in the architecture document (`rpc Register`, `rpc Connect` bidi
+   stream, `RequestCommit`/`ReportCommit`, `Revoke`), plus `From`/`TryFrom`
+   conversions to core types. Needs `tonic-build` and `protoc` in CI.
+2. **`AgentSession`** and `ConnectClient` — registration with the version gate,
+   `FencingEpoch` bumped only on a new process instance (a stream reconnect
+   resumes it), heartbeat carrying the running set, drain.
+3. **`Dispatcher`** — `AgentTable`, `ReadyIndex`, `ReadyQueue` partitioned by
+   `(class, size_bucket)`, `EligibilityBitset` over `bucket_key`,
+   `AdmissionCheck` for the per-job requirements deliberately kept out of the
+   bucket key, `dispatch_block` rows on refusal.
+4. **`Reconciler`** on a 5s tick, sweeping `CommitIntentRepo::live()`.
+
+### Phases 5-7 — not started
+
 5. GPU class, capability probing, emergent two-stage.
 6. Observability, schedules, UI.
 7. Hardening.
 
-Phase 4 is the natural next unit: `transcodarr-proto`, `AgentSession`, and the
-`Dispatcher` with its `CapacityLedger` and `ReadyIndex`. `capability::bucket_key`
-already exists for it.
+### Scope note
+
+Phases 4-7 are each multi-session units — Phase 6 alone is a metrics subsystem,
+a scheduler and a web UI. Attempting them in one pass produces half-built
+subsystems, which is worse than none: a partial dispatcher that hands out work
+it cannot account for is more dangerous than no dispatcher. Take them one phase
+per session, meeting each documented Milestone before moving on.
 
 ### Still outstanding in Phase 2
 
