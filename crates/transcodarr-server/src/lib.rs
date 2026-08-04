@@ -14,6 +14,7 @@
 //! are separate jobs held by separate processes, which is what lets a decision
 //! be re-derived from stored facts without touching a byte of media.
 
+pub mod capacity;
 pub mod evaluator;
 pub mod explain;
 pub mod prober;
@@ -22,6 +23,7 @@ pub mod runtime;
 pub mod scanner;
 pub mod summary;
 
+pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
 pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
