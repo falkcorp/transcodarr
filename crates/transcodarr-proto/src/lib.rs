@@ -6,13 +6,17 @@
 #![warn(missing_docs)]
 //! The agent protocol: message shapes, the version gate, and conversions.
 //!
-//! **Codegen is deliberately not wired up yet.** `proto/transcodarr/v1/agent.proto`
-//! is the checked-in wire contract, and the types here mirror it — but adding
-//! `tonic-build` means adding `protoc` to CI, which is a build-environment
-//! change that belongs with the commit that actually needs a transport. Until
-//! then the interesting half of this crate is available and testable: the
-//! version negotiation, the fencing rule, and the conversions to and from core
-//! types.
+//! `proto/transcodarr/v1/agent.proto` is the wire contract; [`pb`] is what
+//! `tonic-build` makes of it, and [`convert`] is the boundary between those
+//! generated types and the domain types in `transcodarr-core`.
+//!
+//! **The generated types are not used as domain types anywhere.** Every value
+//! that crosses the boundary is converted, and every conversion of an enum-like
+//! field can fail. A proto3 enum decodes an unknown number to its zero variant
+//! rather than to an error, so a peer sending a `DecoderStatus` this build has
+//! never heard of would arrive as `DS_UNTESTED` — and untested is a *claim*,
+//! not the absence of one. Refusing at the boundary is what keeps a value
+//! invented by a newer peer from becoming a domain fact by default.
 //!
 //! The two rules encoded here are the ones a wire format cannot enforce on its
 //! own:
@@ -24,8 +28,22 @@
 //!   reconnect resumes the existing epoch (flaw C9). Bumping on reconnect makes
 //!   every network blip invalidate work that is still running perfectly well.
 
+pub mod convert;
 pub mod handshake;
 pub mod message;
+
+/// The generated types, exactly as `tonic-build` emits them.
+///
+/// Kept in its own module so the lints this crate holds itself to do not apply
+/// to code nobody wrote. `missing_docs` in particular would otherwise force
+/// doc comments onto several hundred generated fields, and the noise would bury
+/// the documentation on the types that are hand-written.
+pub mod pb {
+    #![allow(missing_docs)]
+    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+
+    tonic::include_proto!("transcodarr.v1");
+}
 
 pub use handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 pub use message::{CommitPhase, LiveIntent};
