@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/repo/mod.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: 7a10c5e4-2b98-4d31-95f7-6e0a48b3d271
-// last-edited: 2026-08-03
+// last-edited: 2026-08-04
 //! Repositories.
 //!
 //! Every repository returns domain types — `transcodarr-core` enums and plain
@@ -15,13 +15,14 @@
 //! values for [`crate::Writer`]. A repository never holds a write connection of
 //! its own, so there is exactly one writer no matter how many exist.
 //!
-//! **Six of the eleven contracted repositories are implemented here** —
-//! [`FileRepo`], [`LibraryRepo`], [`JobRepo`], [`DispatchBlockRepo`] and
-//! [`CommitIntentRepo`] and [`TrashRepo`]. `AgentRepo`, `ScheduleRepo`, `ConfigRepo`
-//! and `PoolRepo` arrive with the phases that call them. Writing them ahead of
-//! a caller would ship untested APIs whose first real user is free to discover
-//! they are the wrong shape.
+//! **Seven of the eleven contracted repositories are implemented here** —
+//! [`FileRepo`], [`LibraryRepo`], [`JobRepo`], [`DispatchBlockRepo`],
+//! [`CommitIntentRepo`], [`TrashRepo`] and [`AgentRepo`]. `ScheduleRepo`,
+//! `ConfigRepo` and `PoolRepo` arrive with the phases that call them. Writing
+//! them ahead of a caller would ship untested APIs whose first real user is
+//! free to discover they are the wrong shape.
 
+mod agent;
 mod commit_intent;
 mod dispatch_block;
 mod file;
@@ -29,6 +30,7 @@ mod job;
 mod library;
 mod trash;
 
+pub use agent::{AgentRecord, AgentRegistration, AgentRepo, KnownInstance};
 pub use commit_intent::{CommitIntent, CommitIntentRepo, NewIntent};
 pub use dispatch_block::{DispatchBlock, DispatchBlockRepo};
 pub use file::{FileIdentity, FileRecord, FileRepo, FileUpsert};
