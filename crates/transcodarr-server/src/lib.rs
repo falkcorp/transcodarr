@@ -18,6 +18,7 @@ pub mod capacity;
 pub mod dispatch;
 pub mod evaluator;
 pub mod explain;
+pub mod metrics;
 pub mod prober;
 pub mod reconcile;
 pub mod runner;
