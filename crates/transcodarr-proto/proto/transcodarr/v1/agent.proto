@@ -1,0 +1,188 @@
+// file: crates/transcodarr-proto/proto/transcodarr/v1/agent.proto
+// version: 1.0.0
+// guid: 8d4b1e07-62fa-4c53-9018-3b7e0a25c964
+// last-edited: 2026-08-03
+//
+// The wire contract. Checked in ahead of codegen on purpose: this file is the
+// agreement between server and agent, and it is worth reviewing as a contract
+// before any generated code depends on it. Wiring tonic-build means adding
+// protoc to CI, which belongs with the commit that needs a transport.
+//
+// The semantics that a schema cannot express live in src/handshake.rs:
+// the version gate runs at Register, and fencing_epoch bumps only on a new
+// boot_id -- a stream reconnect resumes it (flaw C9).
+
+syntax = "proto3";
+package transcodarr.v1;
+
+service AgentService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+// agent_id is operator-assigned and stable ("u1", "win-rtx2070").
+// agent_uid is per-installation. boot_id is per-process-instance, and is the
+// ONLY thing that bumps fencing_epoch.
+message AgentIdentity {
+  string agent_id      = 1;
+  string agent_uid     = 2;
+  string boot_id       = 3;
+  string agent_version = 4;
+  uint32 proto_version = 5;
+}
+
+enum DecoderKind { DK_SOFTWARE=0; DK_NVDEC=1; DK_QSV=2; DK_VAAPI=3; DK_VIDEOTOOLBOX=4; }
+
+enum DecoderStatus {
+  DS_UNTESTED=0;
+  DS_VERIFIED_OK=1;
+  // Turing Hi10 h264: exits 0, decoded on CPU. Must NEVER satisfy a hardware
+  // decode requirement -- that is the soft failure that looks like success.
+  DS_VERIFIED_SOFT_FALLBACK=2;
+  // Turing AV1: exit 69, ~1 KiB truncated output.
+  DS_VERIFIED_FAIL=3;
+}
+
+message DecoderTriple { string codec=1; string profile=2; uint32 bit_depth=3; DecoderKind kind=4; }
+
+message DecoderCapability {
+  DecoderTriple triple         = 1;
+  DecoderStatus status         = 2;
+  string        evidence       = 3;
+  uint64        probed_at_unix = 4;
+}
+
+enum RenameProbeStatus {
+  RP_UNTESTED=0;
+  // Renamed over an OPEN existing destination; inode identity confirmed.
+  RP_ATOMIC_VERIFIED=1;
+  // EXDEV, copy+unlink, or dest-open failure => not commit_eligible.
+  RP_NOT_ATOMIC=2;
+}
+
+message Mount {
+  string local_path       = 1;
+  string canonical_prefix = 2;
+  // Server-assigned and echoed back. Never st_dev: two agents see one pool at
+  // different device numbers, and budgeting per-mount triple-counts it.
+  string pool_id          = 3;
+  string fstype           = 4;
+  uint64 free_bytes       = 5;
+  uint64 total_bytes      = 6;
+  bool   writable         = 7;
+  RenameProbeStatus rename_probe = 8;
+  // Resolved per (library root, work dir) against the ACTUAL final path, not
+  // as one global boolean.
+  map<string,bool> workarea_same_device_by_library = 9;
+}
+
+message Capability {
+  string   platform              = 1;
+  string   arch                  = 2;
+  string   ffmpeg_version        = 3;
+  string   ffprobe_version       = 4;
+  string   nvidia_driver_version = 5;
+  uint32   physical_cores        = 6;
+  // cgroup v2 cpu.max, not nproc. A delegated slice's quota is what actually
+  // binds.
+  double   effective_cores       = 7;
+  repeated string classes        = 8;
+  repeated string encoders       = 9;
+  repeated DecoderCapability decoders = 10;
+  repeated string muxers         = 11;
+  repeated Mount  mounts         = 12;
+  uint64   workarea_free_bytes   = 13;
+  string   capability_hash       = 14;
+  map<string,string> labels      = 15;
+}
+
+// Replayed from the fsynced IntentJournal BEFORE the agent accepts any work.
+message LiveIntent {
+  string job_id=1; uint32 attempt=2; uint64 fencing_epoch=3;
+  string phase=4;   // granted | retired | installed
+  string temp_path=5; string final_path=6; string trash_path=7;
+}
+
+message RegisterRequest {
+  AgentIdentity identity   = 1;
+  Capability    capability = 2;
+  string        auth_token = 3;
+  repeated LiveIntent live_intents = 4;
+}
+
+message RegisterResponse {
+  bool   accepted             = 1;
+  string reject_reason        = 2;
+  uint32 server_proto_version = 3;
+  uint32 min_supported_proto  = 4;
+  string min_agent_version    = 5;
+  string server_version       = 6;
+  // Authoritative. The agent MUST use this on every commit; a ReportCommit
+  // bearing a stale epoch is rejected and the job left untouched.
+  uint64 fencing_epoch        = 7;
+  repeated string unknown_job_ids = 8;
+}
+
+message AgentMessage {
+  oneof body {
+    Heartbeat      heartbeat       = 1;
+    JobProgress    progress        = 2;
+    JobResult      result          = 3;
+    CommitRequest  commit_request  = 4;
+    CommitReport   commit_report   = 5;
+    DrainAck       drain_ack       = 6;
+  }
+}
+
+message ServerMessage {
+  oneof body {
+    JobAssignment  assignment      = 1;
+    CommitGrant    commit_grant    = 2;
+    Revoke         revoke          = 3;
+    Drain          drain           = 4;
+    RuntimeConfig  config          = 5;
+  }
+}
+
+message Heartbeat {
+  uint64 at_unix_ms = 1;
+  // What the agent believes it is running. The server kills anything here it
+  // does not recognise -- a survivor of a lost connection must not keep going.
+  repeated string running_job_ids = 2;
+  repeated Mount  mounts = 3;   // re-stat: a mount can vanish under a running agent
+  double  load_average = 4;
+}
+
+message JobAssignment {
+  string job_id = 1; uint32 attempt = 2; uint64 fencing_epoch = 3;
+  string source_path = 4; string final_path = 5; string temp_path = 6;
+  repeated string argv = 7;      // built server-side; the agent does not compose it
+  string validation_spec_json = 8;
+  string expected_content_sig = 9;
+}
+
+message JobProgress {
+  string job_id = 1; uint64 out_time_us = 2; uint64 frames = 3;
+  string speed = 4; uint64 total_size = 5;
+}
+
+message JobResult {
+  string job_id = 1; uint32 attempt = 2;
+  int32  exit_code = 3; int32 signal = 4;
+  string stderr_tail = 5;
+  string validation_json = 6;
+  uint64 output_bytes = 7;
+}
+
+message CommitRequest { string job_id = 1; uint32 attempt = 2; uint64 fencing_epoch = 3; }
+message CommitGrant   { string job_id = 1; bool granted = 2; string reason = 3; string trash_path = 4; }
+message CommitReport  { string job_id = 1; uint32 attempt = 2; uint64 fencing_epoch = 3; string resolution = 4; string detail = 5; }
+message Revoke        { string job_id = 1; string reason = 2; }
+message Drain         { bool immediate = 1; string reason = 2; }
+message DrainAck      { repeated string still_running = 1; }
+
+message RuntimeConfig {
+  uint32 total_slots = 1;
+  map<string,uint32> per_class_slots = 2;
+  uint32 large_slots = 3;
+}
