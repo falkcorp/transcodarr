@@ -1035,6 +1035,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "transcodarr-core",
 ]
 
