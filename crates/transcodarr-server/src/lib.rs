@@ -19,6 +19,7 @@ pub mod dispatch;
 pub mod evaluator;
 pub mod explain;
 pub mod prober;
+pub mod reconcile;
 pub mod runner;
 pub mod runtime;
 pub mod scanner;
@@ -29,6 +30,7 @@ pub use dispatch::{AgentEntry, Assignment, Blocked, DispatchRound, Dispatcher, Q
 pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
+pub use reconcile::{Action, InFlight, Reconciler};
 pub use runner::{JobOutcome, LocalRunner, RunOutcome};
 pub use runtime::Runtime;
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
