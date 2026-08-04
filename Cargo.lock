@@ -1066,6 +1066,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "transcodarr-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "transcodarr-core",
+]
+
+[[package]]
 name = "transcodarr-server"
 version = "0.1.0"
 dependencies = [
