@@ -1049,6 +1049,7 @@ dependencies = [
  "tempfile",
  "transcodarr-agent",
  "transcodarr-core",
+ "transcodarr-server",
 ]
 
 [[package]]

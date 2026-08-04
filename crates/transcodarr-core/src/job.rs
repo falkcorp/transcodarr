@@ -1,5 +1,5 @@
 // file: crates/transcodarr-core/src/job.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 9e17b3c0-6d42-4a85-b2f9-0c73e5a18ff6
 // last-edited: 2026-08-03
 //! Job identity and the state machine.
@@ -87,6 +87,12 @@ impl JobClass {
 }
 
 impl std::fmt::Display for JobClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for JobState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
