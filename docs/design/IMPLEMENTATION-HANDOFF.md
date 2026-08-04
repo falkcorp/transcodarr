@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.0.0 -->
+<!-- version: 3.1.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-03 -->
 
@@ -23,7 +23,7 @@ Read in this order:
 | **0 — Environment preflight** | **Done on U0 and U1**, both commit-eligible. `windows-rtx2070` not run — see `PHASE0-RESULTS.md`. Does not block Phase 2. |
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
-| 3 — Single-node executor and commit ritual | Not started. Revisit D14 here. |
+| 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
 | 4 — Protocol, one agent, dispatcher | Not started. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
@@ -103,6 +103,61 @@ parallelise. Measured on the production pool with Tdarr running alongside:
 Latency-bound is precisely the case where a deep queue helps — each probe waits
 rather than works. The knee is near 32; 96 buys 9% for triple the load. The
 default is now 16, with `--probe-concurrency` for a dedicated ingest run.
+
+### Phase 3 — status
+
+Shipped and merged (PRs #35, #36, #37):
+
+- `WorkArea` (namespaced by `agent_uid`/`boot_id`, identifiers sanitised,
+  cross-device refused), `IntentJournal`, `CommitRitual` and recovery.
+- The crash matrix: every phase against every reachable on-disk state.
+- `Executor`, `ProgressTailer`, output validation.
+- `policy::encode_plan_for` / `validation_spec_for`.
+- `admin run` — encode, validate, install on one machine.
+
+**D14 is decided: colocate the work area on the destination pool.** A
+cross-device work area is now a hard refusal. `rename(2)` is atomic only within
+one filesystem, and the copy-then-delete fallback has a window in which neither
+the source nor a complete replacement exists. Staging on fast local scratch
+moves the same bytes anyway and buys a *non-atomic* install — the I/O is not
+saved, only deferred to the least recoverable moment. This closes the only
+ACCEPTED item of the 56 fatal-flaw resolutions.
+
+**Two things worth knowing:**
+
+1. **The crash matrix was verified to be able to fail.** Sabotaging the restore
+   step so it claims success without restoring anything makes it report
+   `INVARIANT VIOLATED`. A crash matrix that cannot fail is decoration.
+2. **A real bug was found only by running against real media.** Validation
+   compared the source's *container header* duration against the output's
+   *last-packet PTS*. A packet's PTS is the last frame's presentation time, not
+   the end of the file, so it sits one frame lower — inventing a shortfall.
+   Measured: header 5.000s, source PTS 4.900s, output PTS 4.900s. Every unit
+   test passed with the bug present, because they supplied both durations by
+   hand.
+
+End-to-end verified on real ffmpeg media: FLAC installed as EAC3 640k, original
+FLAC retained in the trash, video copied untouched, durations identical.
+
+### Still outstanding in Phase 3
+
+1. `TrashCan` retention and reaping (measured from `zfs used`/`usedbysnapshots`,
+   never from file sizes).
+2. Server-side `CommitIntentRepo` writing `commit_intent` rows, so the ledger
+   exists on the server and not only in the agent's journal.
+3. The 200-real-file milestone on U1, with input/output `file_stream` rows
+   diffed for byte-exact track preservation.
+
+### Phases 4-7 — not started
+
+4. Protocol, one agent, dispatcher (audio class only).
+5. GPU class, capability probing, emergent two-stage.
+6. Observability, schedules, UI.
+7. Hardening.
+
+Phase 4 is the natural next unit: `transcodarr-proto`, `AgentSession`, and the
+`Dispatcher` with its `CapacityLedger` and `ReadyIndex`. `capability::bucket_key`
+already exists for it.
 
 ### Still outstanding in Phase 2
 
