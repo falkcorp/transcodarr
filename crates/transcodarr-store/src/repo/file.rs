@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/file.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: b6f21e94-70a3-4c85-91d0-4a7e2c38f5b1
 // last-edited: 2026-08-03
 //! Files: discovery upserts, stored probe facts, and evaluation bookkeeping.
@@ -89,6 +89,29 @@ pub struct FileRecord {
     pub scan_generation: i64,
     /// When a scan last saw it.
     pub last_seen_unix: i64,
+}
+
+/// Just enough of a stored file to classify a walked one.
+///
+/// `state` stays a `String` here on purpose: the scanner only compares it
+/// against `Missing` to count a returning file as new, and parsing an enum
+/// ~49,600 times to answer one equality test is work with no reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileIdentity {
+    /// Row id.
+    pub id: i64,
+    /// Size in bytes as last recorded.
+    pub size_bytes: i64,
+    /// Modification time, whole seconds.
+    pub mtime_unix: i64,
+    /// Sub-second part of the modification time.
+    pub mtime_ns: i64,
+    /// Inode, where known.
+    pub inode: Option<i64>,
+    /// Device number, where known.
+    pub dev: Option<i64>,
+    /// Stored lifecycle state.
+    pub state: String,
 }
 
 /// Whether an upsert is looking at a file that actually changed on disk.
@@ -201,6 +224,39 @@ impl FileRepo {
                 id: id.to_string(),
             }),
         }
+    }
+
+    /// The minimum needed to decide whether a walked file is new, changed, or
+    /// already known.
+    ///
+    /// Deliberately not a full [`FileRecord`]: this is the only per-file lookup
+    /// in a scan, so on the real libraries it runs ~49,600 times. Reconstructing
+    /// facts and parsing three enums for each of them, only to discard the
+    /// result for every unchanged file, is the difference between a scan that
+    /// finishes and one that is the bottleneck.
+    pub fn identity(
+        &self,
+        library_id: &str,
+        path_hash: &str,
+    ) -> Result<Option<FileIdentity>, StoreError> {
+        let c = self.pool.get()?;
+        Ok(c.query_row(
+            "SELECT id, size_bytes, mtime_unix, mtime_ns, inode, dev, state
+             FROM file WHERE library_id = ?1 AND path_hash = ?2",
+            params![library_id, path_hash],
+            |r| {
+                Ok(FileIdentity {
+                    id: r.get(0)?,
+                    size_bytes: r.get(1)?,
+                    mtime_unix: r.get(2)?,
+                    mtime_ns: r.get(3)?,
+                    inode: r.get(4)?,
+                    dev: r.get(5)?,
+                    state: r.get::<_, String>(6)?,
+                })
+            },
+        )
+        .optional()?)
     }
 
     /// One file by its path within a library.

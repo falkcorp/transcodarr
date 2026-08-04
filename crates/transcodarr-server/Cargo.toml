@@ -1,0 +1,28 @@
+# file: crates/transcodarr-server/Cargo.toml
+# version: 1.0.0
+# guid: 3f6d1b84-52e0-4c97-a83b-9d16e40c7a25
+# last-edited: 2026-08-03
+
+[package]
+name = "transcodarr-server"
+version = "0.1.0"
+description = "transcodarr orchestration: discovery, evaluation, dispatch."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# The only crate that links the store. An agent must stay copyable to the
+# Windows node without dragging SQLite along with it.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+transcodarr-core = { path = "../transcodarr-core" }
+transcodarr-store = { path = "../transcodarr-store" }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
