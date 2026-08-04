@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.5.0 -->
+<!-- version: 3.6.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-04 -->
 
@@ -57,7 +57,7 @@ Two lessons worth keeping:
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
-| 4 — Protocol, one agent, dispatcher | **In progress.** Everything below the transport has landed, plus codegen, `AgentRepo` and `Register` served over gRPC. **`Connect` is refused with `Unimplemented`, and `ConnectClient` does not exist** — an agent can register but cannot yet be given work. |
+| 4 — Protocol, one agent, dispatcher | **In progress.** The server side of the transport is done: codegen, `AgentRepo`, `Register` and the `Connect` stream, all covered over a real gRPC channel. **`ConnectClient` does not exist and no `JobAssignment` is ever sent** — there is no dispatch loop, so an agent connects, is accounted for, and sits idle. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
 | 7 — Hardening | Not started. |
@@ -252,15 +252,32 @@ Three decisions in that work are worth not relitigating:
 - **`commit_eligible` requires every mount to have passed the rename probe**,
   not merely one. `RP_UNTESTED` grants nothing.
 
+**`Connect` has landed** (PR #59), with `AgentTable`. What it enforces, and
+what it deliberately does not, is worth knowing before extending it:
+
+- The stream is identified by **request metadata** (`x-agent-id`,
+  `x-agent-epoch`), not by a message. `AgentMessage` carries no identity, and a
+  `Hello` field serving the transport's convenience does not belong in a
+  reviewed wire contract.
+- A stale epoch cannot open a stream or resolve a commit; a `CommitReport`
+  bearing one is rejected with the intent untouched. There is a paired test
+  asserting the same report under the current epoch *does* resolve it, so the
+  negative case cannot pass by everything being broken.
+- `AgentTable` keeps one connection per agent, newest wins, displaced stream
+  closed. `disconnect` is epoch-guarded so a slow teardown cannot evict the
+  replacement that just arrived.
+- **No `JobAssignment` is ever sent.** That is the dispatch loop's job.
+
+A bug worth remembering: `CommitIntentRepo::get` takes an *intent* id and the
+session only ever knows a *job* id. Passing one to the other answers "no live
+intent" for every job, which reads as a correct refusal until a legitimate
+commit is refused too — and one test merged in #57 was green for exactly that
+reason. `live_for_job` exists now. When a lookup can only ever return `None`,
+every negative test passes and proves nothing.
+
 **Remaining, in dependency order:**
 
-1. **`Connect`** — currently returns `Unimplemented`, deliberately: a stream
-   that accepted assignments with no dispatch loop behind it would hand out work
-   nothing is accounting for. It needs the bidi stream, a per-agent outbound
-   queue, an `AgentTable` the dispatch loop reads, the heartbeat timeout, and
-   the rule that anything running which the server does not recognise gets
-   killed.
-2. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
+1. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
    `IntentJournal`, runs assignments through the existing `Executor` and
    `CommitRitual`. It must keep its `boot_id` across reconnects, or every
    network blip fences work that is still running fine.
