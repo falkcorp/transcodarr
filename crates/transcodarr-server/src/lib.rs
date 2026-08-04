@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.6.0
+// version: 1.7.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-04
 #![deny(unsafe_code)]
@@ -18,6 +18,7 @@ pub mod capacity;
 pub mod dispatch;
 pub mod evaluator;
 pub mod explain;
+pub mod fleet;
 pub mod hardening;
 pub mod metrics;
 pub mod prober;
@@ -33,6 +34,7 @@ pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
 pub use dispatch::{AgentEntry, Assignment, Blocked, DispatchRound, Dispatcher, QueuedJob};
 pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
+pub use fleet::{AgentTable, Connected};
 pub use hardening::{AgentHealth, RetryDecision, decide_retry};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
 pub use reconcile::{Action, InFlight, Reconciler};

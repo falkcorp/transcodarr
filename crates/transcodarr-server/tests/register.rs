@@ -25,7 +25,7 @@ use tonic::transport::{Channel, Server};
 
 use transcodarr_proto::pb;
 use transcodarr_server::AgentSession;
-use transcodarr_store::repo::{AgentRepo, CommitIntentRepo};
+use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, JobRepo};
 use transcodarr_store::{Db, ReadPool, Writer};
 
 /// A live server on a loopback port, with a client already dialled.
@@ -44,6 +44,7 @@ async fn harness(auth_token: Option<&str>) -> Harness {
     let session = AgentSession::new(
         AgentRepo::new(pool.clone()),
         CommitIntentRepo::new(pool.clone()),
+        JobRepo::new(pool.clone()),
         writer,
         auth_token.map(str::to_string),
     );
@@ -310,11 +311,13 @@ async fn an_intent_the_server_never_granted_is_named_back_to_the_agent() {
     assert_eq!(res.unknown_job_ids, vec!["ghost-job".to_string()]);
 }
 
-/// Refused rather than faked. A stream that accepted assignments with no
-/// dispatch loop behind it would hand out work nothing is accounting for.
+/// Registration and the stream are separate gates, and the stream has its own.
+/// A caller that skips `Register` has no epoch to present, so it cannot open
+/// one — see `connect.rs` for the rest of that surface.
 #[tokio::test]
-async fn connect_is_refused_explicitly_until_it_is_served() {
+async fn a_stream_without_an_identity_cannot_be_opened() {
     let mut h = harness(None).await;
     let err = h.client.connect(tokio_stream::empty()).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    assert!(err.message().contains("x-agent-id"), "{}", err.message());
 }
