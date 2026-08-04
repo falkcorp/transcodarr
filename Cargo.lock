@@ -1074,6 +1074,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "transcodarr-agent",
  "transcodarr-core",
  "transcodarr-store",
  "walkdir",

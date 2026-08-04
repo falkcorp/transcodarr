@@ -121,6 +121,22 @@ pub enum AdminCommand {
         path: String,
     },
 
+    /// Run pending jobs on this machine: encode, validate, install.
+    Run {
+        /// Database file.
+        #[arg(long, default_value = DEFAULT_DB)]
+        db: PathBuf,
+        /// Which library. Omit to run every enabled one.
+        #[arg(long)]
+        library: Option<String>,
+        /// How many jobs to attempt.
+        #[arg(long, default_value_t = 1)]
+        limit: u32,
+        /// Print the ffmpeg command for each job without running anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// What needs transcoding, by decision.
     Summary {
         /// Database file.
@@ -193,6 +209,13 @@ pub fn run(cmd: AdminCommand) -> Result<()> {
         AdminCommand::Evaluate { db, library, force } => evaluate(db, library, force),
 
         AdminCommand::Explain { db, path } => explain(db, path),
+
+        AdminCommand::Run {
+            db,
+            library,
+            limit,
+            dry_run,
+        } => run_jobs(db, library, limit, dry_run),
 
         AdminCommand::Summary { db, library } => summary(db, library),
     }
@@ -353,6 +376,45 @@ fn explain(db: PathBuf, path: String) -> Result<()> {
     let policy = policy::default_space_saver();
     let explanation = Explainer::new(store.pool().clone()).explain(&path, &policy)?;
     print!("{}", explanation.render());
+    Ok(())
+}
+
+fn run_jobs(db: PathBuf, library: Option<String>, limit: u32, dry_run: bool) -> Result<()> {
+    let store = open_store(&db)?;
+    let policy = policy::default_space_saver();
+    let runner = transcodarr_server::LocalRunner::new(
+        store.pool().clone(),
+        std::sync::Arc::clone(store.writer()),
+        transcodarr_server::ExecutorConfig::default(),
+    );
+
+    for lib in selected(&store, library)? {
+        let out = runner.run_library(&lib, &policy, limit, dry_run)?;
+        println!(
+            "{}: {} attempted, {} installed, {} rejected, {} failed",
+            lib.id, out.attempted, out.installed, out.rejected, out.failed
+        );
+        for j in &out.jobs {
+            match (&j.resolution, &j.rejected) {
+                // Stated as "saved"/"grew" rather than a signed number: an
+                // audio pass to EAC3 640k legitimately grows the file, and a
+                // bare `+0.33 MiB` reads as a saving to anyone skimming.
+                (Some(r), _) => {
+                    let mib = j.bytes_delta as f64 / (1024.0 * 1024.0);
+                    let size = if j.bytes_delta >= 0 {
+                        format!("saved {mib:.2} MiB")
+                    } else {
+                        format!("grew {:.2} MiB", -mib)
+                    };
+                    println!("  {:<12} {}  ({size})", r.label(), j.path);
+                }
+                (None, Some(why)) => {
+                    println!("  {:<12} {}\n               {why}", "skipped", j.path)
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(())
 }
 

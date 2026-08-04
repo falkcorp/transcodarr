@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-03
 #![deny(unsafe_code)]
@@ -17,6 +17,7 @@
 pub mod evaluator;
 pub mod explain;
 pub mod prober;
+pub mod runner;
 pub mod runtime;
 pub mod scanner;
 pub mod summary;
@@ -24,9 +25,11 @@ pub mod summary;
 pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
+pub use runner::{JobOutcome, LocalRunner, RunOutcome};
 pub use runtime::Runtime;
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
 pub use summary::{LibrarySummary, summarize};
+pub use transcodarr_agent::ExecutorConfig;
 pub use transcodarr_store::repo::LibraryRecord;
 
 use thiserror::Error;
@@ -55,6 +58,10 @@ pub enum ServerError {
         /// The path that could not be walked.
         root: String,
     },
+
+    /// The agent reported a failure.
+    #[error("agent: {0}")]
+    Agent(#[from] transcodarr_agent::AgentError),
 
     /// No stored file matches a path.
     ///

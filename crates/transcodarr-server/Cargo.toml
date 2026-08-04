@@ -20,6 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+transcodarr-agent = { path = "../transcodarr-agent" }
 transcodarr-core = { path = "../transcodarr-core" }
 transcodarr-store = { path = "../transcodarr-store" }
 walkdir = { workspace = true }
