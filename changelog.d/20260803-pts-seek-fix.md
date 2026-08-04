@@ -14,7 +14,7 @@ the last packet is consulted.
 
 Measured on a real 23-minute Blu-ray remux on the server:
 
-```
+```text
 broken  (-read_intervals -60)          → (empty)
 fixed   (-read_intervals 1362%+#100000) → 1421.962000
 header duration                         → 1422.016000

@@ -1,7 +1,7 @@
 <!-- file: CLAUDE.md -->
-<!-- version: 2.5.0 -->
+<!-- version: 2.5.1 -->
 <!-- guid: 3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f -->
-<!-- last-edited: 2026-07-31 -->
+<!-- last-edited: 2026-08-04 -->
 
 # CLAUDE.md
 
@@ -14,6 +14,7 @@ Org-wide coding standards are in the `.standards/` git submodule (cloned from `h
 Always clone with `git clone --recurse-submodules` so these are available.
 
 Key files:
+
 - **File headers (MANDATORY):** `.standards/instructions/file-headers.md`
 - **Commit format:** `.standards/instructions/commit-messages.md`
 
@@ -41,7 +42,6 @@ workflows are retired.
 
 For all agent, Claude, or workflow tasks, **refer to the above files**. Do not duplicate or override
 these rules elsewhere.
-
 
 ## 📝 Changelog & TODO — Use the Fragment System (MANDATORY)
 

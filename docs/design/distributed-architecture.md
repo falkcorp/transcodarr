@@ -1,7 +1,7 @@
 <!-- file: docs/design/distributed-architecture.md -->
-<!-- version: 1.1.0 -->
+<!-- version: 1.1.1 -->
 <!-- guid: f15e2f8e-1e3b-4ac5-a124-9ce13a18ab26 -->
-<!-- last-edited: 2026-07-31 -->
+<!-- last-edited: 2026-08-04 -->
 
 # transcodarr — Distributed Transcode Orchestrator
 
@@ -140,7 +140,7 @@ a warning.
 
 The repository becomes a Cargo workspace. The single `src/main.rs` is dissolved; nothing is deleted, everything is relocated.
 
-```
+```text
 transcodarr/
   Cargo.toml                     # [workspace] only — virtual manifest
   Cargo.lock                     # committed (already is; .gitignore lies, leave it)
@@ -197,7 +197,7 @@ The `json` feature is deleted; `serde` is unconditional everywhere. Note the wor
 
 Dependencies point one way only, and CI enforces it with `cargo tree -i` assertions in `xtask`:
 
-```
+```text
 core  <-  proto  <-  store  <-  server
   ^         ^                     ^
   |         +--------- agent -----+
@@ -1756,7 +1756,7 @@ video_cpu = 1
 
 `ScheduleEngine` recomputes `EffectiveLimits` every 30 s, at every window boundary, and on `DispatchEvent::ConfigApplied`:
 
-```
+```text
 EffectiveLimits = base_limits
                   |> apply(highest-priority active schedule_window)
                   |> apply(each unexpired schedule_override)
@@ -1790,7 +1790,7 @@ large = 1
 
 `schedule_override` rows are the manual escape hatch and carry a **mandatory** `expires_unix`, so a temporary pause can never become a permanent mystery:
 
-```
+```http
 POST /api/v1/schedule/override
 {"scope":"agent:win-rtx2070","class":"video_gpu","slots":0,
  "until":"+2h","reason":"gaming"}
@@ -1984,7 +1984,7 @@ T2's guard applies here: **throughput SLOs are expressed in `bytes_reclaimed_tot
 
 R3's separation of scanning from dispatch is only real if it is measured. The acceptance test asserts:
 
-```
+```promql
 histogram_quantile(0.99, rate(transcodarr_dispatch_latency_seconds_bucket[1m])) <= 0.1
 ```
 
@@ -2074,7 +2074,7 @@ the CLI share one error path:
              "detail": { "job_id": 88213, "state": "Running" } } }
 ```
 
-### Conventions
+### API conventions
 
 - Base path `/api/v1`. Anything outside it is UI assets, `/metrics`, `/healthz`, `/readyz`.
 - **Keyset pagination only.** `?after=<cursor>&limit=<n<=500>`; the response carries
@@ -2212,7 +2212,7 @@ fed by the `Writer` *after* a transaction commits, so the UI never shows a state
 does not hold. On `RecvError::Lagged`, the server emits `event: resync` and the client
 re-fetches the affected list.
 
-```
+```text
 event: progress
 data: {"job_id":88213,"attempt":1,"fps":71.4,"speed":1.82,"out_time_us":412000000,
        "total_duration_us":2830000000,"eta_seconds":812,"bytes_written":1183842304}
@@ -2493,7 +2493,7 @@ The `Connect` stream carries the same credential — the mTLS session, or `autho
 pub fn auth_interceptor(req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>;
 ```
 
-Credentials live **on disk, never in the database**. `config_revision.toml` is stored in SQLite and served verbatim by the API, so any secret placed in the policy TOML would be readable from the UI and copied into every nightly `VACUUM INTO` backup. `ServerConfig` validation rejects a config containing an inline `token = ` value with a hard error pointing at `token_file`. The server refuses to start if `token_file` or `server_key` is group- or world-readable.
+Credentials live **on disk, never in the database**. `config_revision.toml` is stored in SQLite and served verbatim by the API, so any secret placed in the policy TOML would be readable from the UI and copied into every nightly `VACUUM INTO` backup. `ServerConfig` validation rejects a config containing an inline `token =` value with a hard error pointing at `token_file`. The server refuses to start if `token_file` or `server_key` is group- or world-readable.
 
 ### What an agent may do to the filesystem
 

@@ -1,0 +1,55 @@
+// file: .markdownlint-cli2.jsonc
+// version: 1.0.0
+// guid: 0c6b28f1-9a34-4d75-8e02-b31f5a7c94e8
+// last-edited: 2026-08-04
+//
+// Markdown lint has never actually run in this repository -- the CI workflow it
+// belonged to failed to parse from the day it was written -- so its first real
+// execution reported 1,067 findings, none of which anyone had a chance to see.
+//
+// The rules disabled below are the ones that conflict with a documented house
+// convention. Each is turned off with its reason, not because it was noisy.
+// Everything else stays on and the violations were fixed.
+{
+  "config": {
+    // Every file in this repository opens with the mandatory four-line header
+    // (file, version, guid, last-edited). That is a documented standard, and it
+    // means no file can begin with a top-level heading. The rule and the
+    // standard cannot both be satisfied; the standard wins.
+    "MD041": false,
+
+    // The design documents carry wide tables, SQL DDL and metric names that do
+    // not wrap. Prose in this repository is already written to 80 columns by
+    // hand; enforcing it mechanically would reformat tables into unreadability
+    // to satisfy a linter.
+    "MD013": false,
+
+    // Table cells are not padded to a common width. In a document with a
+    // 21-table schema appendix, alignment padding is churn that obscures the
+    // real diff whenever a column changes.
+    "MD060": false,
+
+    // The design and handoff documents lead paragraphs with a bold phrase --
+    // "**Milestone.** The DI-1 invariant is ...". That is a sentence opener,
+    // not a heading standing in for one, and turning them into headings would
+    // wreck the document outline.
+    "MD036": false,
+
+    // The list under "Phases 5-7" is numbered 5, 6, 7 because those ARE the
+    // phase numbers. The rule can only see list position and wants them
+    // renumbered 1, 2, 3 -- which would make the document say phases 1 through
+    // 3 remain outstanding. That is not a formatting preference, it is false.
+    "MD029": false
+  },
+
+  "ignores": [
+    // A git submodule. Its content belongs to falkcorp/.github and is linted
+    // there; linting a checkout of someone else's repository here produces
+    // findings nobody in this repository can act on.
+    ".standards/**",
+    "target/**",
+    "node_modules/**",
+    // Working notes, not shipped documentation.
+    "PLAN.md"
+  ]
+}

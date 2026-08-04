@@ -1,7 +1,7 @@
 <!-- file: README.md -->
-<!-- version: 0.9.0 -->
+<!-- version: 0.9.1 -->
 <!-- guid: 0a1b2c3d-4e5f-6789-abcd-ef0123456789 -->
-<!-- last-edited: 2026-07-31 -->
+<!-- last-edited: 2026-08-04 -->
 
 # transcodarr
 
@@ -91,7 +91,6 @@ Generated examples:
 - `test_bars_480p_h265_aac.mkv` (3s, SMPTE bars)
 - `test_audio_sine_aac.m4a` (3s, audio-only)
 - `test_with_subs_h264_aac.mp4` (3s, embedded subtitles)
-
 
 ## Testing
 
