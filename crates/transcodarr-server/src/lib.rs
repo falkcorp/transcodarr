@@ -23,6 +23,7 @@ pub mod reconcile;
 pub mod runner;
 pub mod runtime;
 pub mod scanner;
+pub mod schedule;
 pub mod summary;
 
 pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
@@ -34,6 +35,7 @@ pub use reconcile::{Action, InFlight, Reconciler};
 pub use runner::{JobOutcome, LocalRunner, RunOutcome};
 pub use runtime::Runtime;
 pub use scanner::{ScanOptions, ScanOutcome, Scanner};
+pub use schedule::{EffectiveLimits, Override, ScheduleEngine, ScheduleWindow};
 pub use summary::{LibrarySummary, summarize};
 pub use transcodarr_agent::ExecutorConfig;
 pub use transcodarr_store::repo::LibraryRecord;
