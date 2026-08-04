@@ -14,11 +14,13 @@ pub mod commit;
 pub mod executor;
 pub mod journal;
 pub mod preflight;
+pub mod probe_caps;
 pub mod workarea;
 
 pub use commit::{CommitRequest, CommitRitual, Resolution, SourceGuard};
 pub use executor::{Execution, Executor, ExecutorConfig, Progress, ProgressTailer};
 pub use journal::{IntentJournal, IntentPhase, IntentRecord};
+pub use probe_caps::{TrialOutcome, capability_for, classify};
 pub use workarea::WorkArea;
 
 use thiserror::Error;
