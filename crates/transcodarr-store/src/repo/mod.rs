@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/mod.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 7a10c5e4-2b98-4d31-95f7-6e0a48b3d271
 // last-edited: 2026-08-03
 //! Repositories.
@@ -29,7 +29,7 @@ mod job;
 mod library;
 
 pub use dispatch_block::{DispatchBlock, DispatchBlockRepo};
-pub use file::{FileRecord, FileRepo, FileUpsert};
+pub use file::{FileIdentity, FileRecord, FileRepo, FileUpsert};
 pub use job::{JobEvent, JobRecord, JobRepo, NewJob};
 pub use library::{LibraryRecord, LibraryRepo, ScanRun};
 
