@@ -138,7 +138,18 @@ jobs:
                   lint: true
                   format: false
                   breaking: true
-                  breaking_against: "https://github.com/${{ github.repository }}.git#branch=main"
+                  # `subdir` is required, not decorative. Without it buf reads
+                  # main with whatever module configuration main happens to
+                  # have, and names the file relative to that root -- so the
+                  # same unchanged file appears under two different paths and
+                  # every run reports it as deleted. Pinning the module root on
+                  # both sides compares like with like.
+                  breaking_against: "https://github.com/${{ github.repository }}.git#branch=main,subdir=crates/transcodarr-proto/proto"
+                  # The job's verdict is the check result. Commenting needs
+                  # `pull-requests: write`, which this workflow deliberately
+                  # does not hold -- a contract check has no business writing to
+                  # the pull request.
+                  pr_comment: false
                   push: false
                   archive: false
 
