@@ -1,8 +1,8 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-04
-//! Registration: the server side of the handshake.
+//! Registration and the agent stream: the server side of the transport.
 //!
 //! This is where an agent asks permission, and the only place a `fencing_epoch`
 //! is issued. Four gates run in order, and the order is the point — each one
@@ -26,19 +26,43 @@
 //! before it asked, or a rejected registration becomes a way to overwrite a
 //! healthy row.
 //!
-//! `Connect` is not implemented yet and says so. That is deliberate: a stream
-//! that accepted assignments without the dispatch loop behind it would hand out
-//! work nobody is accounting for, which is worse than no stream at all.
+//! ## How `Connect` knows who is calling
+//!
+//! The `AgentMessage` envelope carries no identity — every variant of it is a
+//! message *about* work, not about the sender. So the stream is identified by
+//! request metadata, `x-agent-id` and `x-agent-epoch`, set once when the stream
+//! opens.
+//!
+//! Adding a `Hello` message to the schema would also work and was not done:
+//! `agent.proto` is the reviewed agreement between both ends, and a field
+//! serving the transport's convenience does not belong in it. Metadata is the
+//! layer this actually lives at.
+//!
+//! The epoch in that metadata is checked against the stored one and must match
+//! exactly. A stream opened under a superseded epoch belongs to a process
+//! instance the server has already replaced, and letting it reconnect would
+//! hand a revoked instance a live channel.
+//!
+//! ## What the stream will not do yet
+//!
+//! No `JobAssignment` is ever sent, because there is no dispatch loop to decide
+//! one. Everything here is the half that must be right *before* work can be
+//! handed out: fencing on every commit, revoking work the server does not
+//! recognise, and lease bookkeeping. An agent connects, is accounted for, and
+//! sits idle.
 
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
 use transcodarr_core::capability::Capability;
+use transcodarr_core::job::JobState;
 use transcodarr_proto::handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
-use transcodarr_store::repo::{AgentRegistration, AgentRepo, CommitIntentRepo};
+use transcodarr_store::repo::{AgentRegistration, AgentRepo, CommitIntentRepo, JobRepo};
 use transcodarr_store::writer::{WriteLane, Writer};
+
+use crate::fleet::AgentTable;
 
 /// How long a lease lasts before an agent must have been heard from again.
 const LEASE_SECONDS: i64 = 45;
@@ -46,11 +70,32 @@ const LEASE_SECONDS: i64 = 45;
 /// The server version reported to agents.
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Serves `Register`, and will serve `Connect`.
+/// Metadata key carrying the operator-assigned agent name on `Connect`.
+const AGENT_ID_KEY: &str = "x-agent-id";
+
+/// Metadata key carrying the epoch the stream authenticated under.
+const AGENT_EPOCH_KEY: &str = "x-agent-epoch";
+
+/// Job states in which an agent is legitimately holding work.
+///
+/// Anything an agent claims to be running that is not in one of these is
+/// revoked. A survivor of a lost connection must not keep going: the server has
+/// already accounted for that slot as free, and two encodes writing the same
+/// output is the one outcome the whole ledger exists to prevent.
+const HELD_STATES: [JobState; 4] = [
+    JobState::Assigned,
+    JobState::Running,
+    JobState::Verifying,
+    JobState::Committing,
+];
+
+/// Serves `Register` and `Connect`.
 #[derive(Clone)]
 pub struct AgentSession {
     agents: AgentRepo,
     intents: CommitIntentRepo,
+    jobs: JobRepo,
+    fleet: AgentTable,
     writer: Arc<Writer>,
     gate: VersionGate,
     /// The shared secret an agent must present, when one is configured.
@@ -78,12 +123,15 @@ impl AgentSession {
     pub fn new(
         agents: AgentRepo,
         intents: CommitIntentRepo,
+        jobs: JobRepo,
         writer: Arc<Writer>,
         auth_token: Option<String>,
     ) -> Self {
         Self {
             agents,
             intents,
+            jobs,
+            fleet: AgentTable::new(),
             writer,
             gate: VersionGate::default(),
             auth_token,
@@ -94,6 +142,17 @@ impl AgentSession {
     pub fn with_gate(mut self, gate: VersionGate) -> Self {
         self.gate = gate;
         self
+    }
+
+    /// Share a fleet table with the dispatch loop that will read it.
+    pub fn with_fleet(mut self, fleet: AgentTable) -> Self {
+        self.fleet = fleet;
+        self
+    }
+
+    /// The registry of connected agents.
+    pub fn fleet(&self) -> &AgentTable {
+        &self.fleet
     }
 
     /// A refusal, as a clean response that changes nothing.
@@ -162,7 +221,7 @@ impl AgentSession {
         for intent in live {
             let known = self
                 .intents
-                .get(&intent.job_id)
+                .live_for_job(&intent.job_id)
                 .map_err(|e| Status::internal(format!("commit ledger unreadable: {e}")))?;
             let live_for_path = self
                 .intents
@@ -348,18 +407,327 @@ impl pb::agent_service_server::AgentService for AgentSession {
 
     type ConnectStream = tokio_stream::wrappers::ReceiverStream<Result<pb::ServerMessage, Status>>;
 
-    /// Not yet implemented, and refused rather than faked.
+    /// Hold a bidirectional stream with one registered agent.
     ///
-    /// A stream that accepted assignments without the dispatch loop behind it
-    /// would hand out work nothing is accounting for. An explicit refusal
-    /// leaves an agent connected, registered and idle, which is recoverable;
-    /// silently accepting would not be.
+    /// The stream is admitted only if the agent is registered, not
+    /// quarantined, and presenting the epoch it currently holds. A stream
+    /// opened under a superseded epoch belongs to a process instance the server
+    /// has already replaced; letting it in would hand a revoked instance a live
+    /// channel.
     async fn connect(
         &self,
-        _request: Request<tonic::Streaming<pb::AgentMessage>>,
+        request: Request<tonic::Streaming<pb::AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        Err(Status::unimplemented(
-            "Connect is not served yet; this build accepts Register only",
+        let (agent_id, claimed_epoch) = stream_identity(request.metadata())?;
+
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .map_err(|e| Status::internal(format!("agent registry unreadable: {e}")))?
+            .ok_or_else(|| Status::unauthenticated("register before connecting"))?;
+
+        if agent.status == "Quarantined" {
+            return Err(Status::permission_denied("agent is quarantined"));
+        }
+        if claimed_epoch != agent.fencing_epoch {
+            return Err(Status::unauthenticated(format!(
+                "epoch {claimed_epoch} is not current ({}); register again",
+                agent.fencing_epoch
+            )));
+        }
+
+        let rx = self.fleet.connect(&agent_id, agent.fencing_epoch);
+        self.write(AgentRepo::set_status_op(agent_id.clone(), "Online".into()))
+            .await?;
+
+        let session = self.clone();
+        let epoch = agent.fencing_epoch;
+        let inbound_agent = agent_id.clone();
+        tokio::spawn(async move {
+            let mut inbound = request.into_inner();
+            loop {
+                match inbound.message().await {
+                    Ok(Some(msg)) => {
+                        if let Err(e) = session.handle(&inbound_agent, epoch, msg).await {
+                            tracing::warn!(agent = %inbound_agent, error = %e, "stream message failed");
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!(agent = %inbound_agent, error = %e, "stream ended in error");
+                        break;
+                    }
+                }
+            }
+
+            // Offline, not fenced. A dropped connection does not invalidate work
+            // already granted -- that is what the next registration's epoch bump
+            // is for -- and fencing here would kill a job running perfectly well
+            // behind a network fault.
+            session.fleet.disconnect(&inbound_agent, epoch);
+            if let Err(e) = session
+                .write(AgentRepo::set_status_op(
+                    inbound_agent.clone(),
+                    "Offline".into(),
+                ))
+                .await
+            {
+                tracing::warn!(agent = %inbound_agent, error = %e, "could not mark agent offline");
+            }
+            tracing::info!(agent = %inbound_agent, "agent disconnected");
+        });
+
+        tracing::info!(agent = %agent_id, epoch, "agent connected");
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
+    }
+}
+
+/// Read the agent's identity from the stream's metadata.
+///
+/// See the module documentation for why this is not a message in the schema.
+///
+/// The `Status` error is large and clippy says so; boxing it would only move
+/// the cost, since the value is returned straight out of an RPC handler that
+/// must produce a `Status` anyway.
+#[allow(clippy::result_large_err)]
+fn stream_identity(md: &tonic::metadata::MetadataMap) -> Result<(String, i64), Status> {
+    let agent_id = md
+        .get(AGENT_ID_KEY)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Status::unauthenticated(format!("{AGENT_ID_KEY} is required")))?
+        .to_string();
+
+    let epoch = md
+        .get(AGENT_EPOCH_KEY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| Status::unauthenticated(format!("{AGENT_EPOCH_KEY} must be an integer")))?;
+
+    Ok((agent_id, epoch))
+}
+
+impl AgentSession {
+    /// Dispatch one inbound message.
+    async fn handle(
+        &self,
+        agent_id: &str,
+        epoch: i64,
+        msg: pb::AgentMessage,
+    ) -> Result<(), Status> {
+        let Some(body) = msg.body else {
+            return Ok(()); // an empty envelope from a newer peer: nothing to do
+        };
+
+        match body {
+            pb::agent_message::Body::Heartbeat(hb) => self.on_heartbeat(agent_id, epoch, hb).await,
+            pb::agent_message::Body::CommitRequest(req) => {
+                self.on_commit_request(agent_id, epoch, req).await
+            }
+            pb::agent_message::Body::CommitReport(rep) => {
+                self.on_commit_report(agent_id, epoch, rep).await
+            }
+            pb::agent_message::Body::Progress(p) => {
+                // Lossy by design: progress is a display concern, and the
+                // metrics that consume it arrive in Phase 6.
+                tracing::trace!(agent = %agent_id, job = %p.job_id, out_time_us = p.out_time_us, "progress");
+                Ok(())
+            }
+            pb::agent_message::Body::Result(r) => {
+                // Recorded, not acted on. Completing an assignment is the
+                // dispatch loop's job, and there is no dispatch loop yet -- so
+                // this build must not pretend a job finished.
+                tracing::info!(
+                    agent = %agent_id, job = %r.job_id, exit_code = r.exit_code,
+                    "job result received, but this build does not yet dispatch work"
+                );
+                Ok(())
+            }
+            pb::agent_message::Body::DrainAck(ack) => {
+                tracing::info!(agent = %agent_id, still_running = ack.still_running.len(), "drain acknowledged");
+                Ok(())
+            }
+        }
+    }
+
+    /// A heartbeat: extend the lease, and revoke anything unrecognised.
+    ///
+    /// The running set is the interesting half. A job this agent claims to be
+    /// running that the server does not have assigned to it, under this epoch,
+    /// in a state where work is legitimately held, is a survivor of a lost
+    /// connection. The server has already accounted for that slot as free, and
+    /// two encodes writing one output is what the whole ledger exists to
+    /// prevent — so it is revoked rather than adopted.
+    async fn on_heartbeat(
+        &self,
+        agent_id: &str,
+        epoch: i64,
+        hb: pb::Heartbeat,
+    ) -> Result<(), Status> {
+        self.fleet.set_running(agent_id, hb.running_job_ids.clone());
+        self.write(AgentRepo::heartbeat_op(agent_id.to_string(), LEASE_SECONDS))
+            .await?;
+
+        for job_id in &hb.running_job_ids {
+            let recognised = match self.jobs.get(job_id) {
+                Ok(job) => {
+                    job.agent_id.as_deref() == Some(agent_id)
+                        && job.fencing_epoch == epoch
+                        && HELD_STATES.contains(&job.state)
+                }
+                // A job the server has never heard of is emphatically not
+                // recognised. An unreadable store is a different matter and is
+                // reported rather than answered with a revoke.
+                Err(transcodarr_store::StoreError::NotFound { .. }) => false,
+                Err(e) => return Err(Status::internal(format!("job lookup failed: {e}"))),
+            };
+
+            if !recognised {
+                tracing::warn!(agent = %agent_id, job = %job_id, "revoking unrecognised running job");
+                self.fleet.send(
+                    agent_id,
+                    pb::ServerMessage {
+                        body: Some(pb::server_message::Body::Revoke(pb::Revoke {
+                            job_id: job_id.clone(),
+                            reason: "the server has no record of this job on this agent".into(),
+                        })),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// An agent asking permission to install.
+    ///
+    /// Granted only against a live intent the server itself recorded, held by
+    /// this agent under the current epoch. Everything else is refused with a
+    /// reason: permission to replace a file is not something to infer from the
+    /// asking.
+    async fn on_commit_request(
+        &self,
+        agent_id: &str,
+        epoch: i64,
+        req: pb::CommitRequest,
+    ) -> Result<(), Status> {
+        let (granted, reason, trash_path) = self.judge_commit(agent_id, epoch, &req)?;
+        if !granted {
+            tracing::warn!(agent = %agent_id, job = %req.job_id, %reason, "commit refused");
+        }
+        self.fleet.send(
+            agent_id,
+            pb::ServerMessage {
+                body: Some(pb::server_message::Body::CommitGrant(pb::CommitGrant {
+                    job_id: req.job_id,
+                    granted,
+                    reason,
+                    trash_path,
+                })),
+            },
+        );
+        Ok(())
+    }
+
+    /// The decision behind a commit grant, separated so it can be tested
+    /// without a stream.
+    #[allow(clippy::result_large_err)]
+    fn judge_commit(
+        &self,
+        agent_id: &str,
+        epoch: i64,
+        req: &pb::CommitRequest,
+    ) -> Result<(bool, String, String), Status> {
+        if i64::try_from(req.fencing_epoch).unwrap_or(-1) != epoch {
+            return Ok((
+                false,
+                format!(
+                    "epoch {} is not the one this stream holds ({epoch})",
+                    req.fencing_epoch
+                ),
+                String::new(),
+            ));
+        }
+
+        let intent = self
+            .intents
+            .live_for_job(&req.job_id)
+            .map_err(|e| Status::internal(format!("commit ledger unreadable: {e}")))?;
+
+        let Some(intent) = intent else {
+            return Ok((
+                false,
+                "no live commit intent for this job".to_string(),
+                String::new(),
+            ));
+        };
+
+        if intent.state != "live" {
+            return Ok((false, format!("intent is {}", intent.state), String::new()));
+        }
+        if intent.agent_id != agent_id {
+            return Ok((
+                false,
+                format!("intent belongs to {}", intent.agent_id),
+                String::new(),
+            ));
+        }
+        if intent.fencing_epoch != epoch {
+            return Ok((
+                false,
+                format!("intent was granted under epoch {}", intent.fencing_epoch),
+                String::new(),
+            ));
+        }
+
+        Ok((true, String::new(), intent.final_path))
+    }
+
+    /// An agent reporting how a commit ended.
+    ///
+    /// A report bearing a stale epoch is rejected and **the job is left
+    /// untouched**. That is the whole point of the fence: an instance the
+    /// server has already replaced must not be able to resolve a ledger entry,
+    /// because its view of what happened on disk is exactly what the
+    /// replacement was created to stop trusting.
+    async fn on_commit_report(
+        &self,
+        agent_id: &str,
+        epoch: i64,
+        rep: pb::CommitReport,
+    ) -> Result<(), Status> {
+        if i64::try_from(rep.fencing_epoch).unwrap_or(-1) != epoch {
+            tracing::warn!(
+                agent = %agent_id, job = %rep.job_id, reported = rep.fencing_epoch, current = epoch,
+                "commit report bearing a stale epoch rejected; the job is left untouched"
+            );
+            return Ok(());
+        }
+
+        let Some(intent) = self
+            .intents
+            .live_for_job(&rep.job_id)
+            .map_err(|e| Status::internal(format!("commit ledger unreadable: {e}")))?
+        else {
+            tracing::warn!(agent = %agent_id, job = %rep.job_id, "commit report for an unknown intent");
+            return Ok(());
+        };
+
+        if intent.agent_id != agent_id || intent.fencing_epoch != epoch {
+            tracing::warn!(
+                agent = %agent_id, job = %rep.job_id,
+                "commit report from an agent or epoch the intent was not granted to"
+            );
+            return Ok(());
+        }
+
+        self.write(CommitIntentRepo::resolve_op(
+            intent.id,
+            rep.resolution.clone(),
         ))
+        .await?;
+        tracing::info!(agent = %agent_id, job = %rep.job_id, resolution = %rep.resolution, "commit resolved");
+        Ok(())
     }
 }

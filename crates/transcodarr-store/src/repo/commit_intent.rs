@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/repo/commit_intent.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 6e10a4d3-92c7-4b58-81f0-3a5d76e29b41
-// last-edited: 2026-08-03
+// last-edited: 2026-08-04
 //! The server-side commit ledger.
 //!
 //! The agent's `IntentJournal` survives a crash of the *agent*. This table
@@ -116,6 +116,27 @@ impl CommitIntentRepo {
         Ok(c.query_row(
             &format!("SELECT {INTENT_COLUMNS} FROM commit_intent WHERE id = ?1"),
             [id],
+            CommitIntent::from_row,
+        )
+        .optional()?)
+    }
+
+    /// The live intent for a job, if there is one.
+    ///
+    /// Distinct from [`CommitIntentRepo::get`], which takes the *intent* id.
+    /// The session only ever knows a job id — an agent asking permission names
+    /// the job it is working on, not a ledger row it has never seen — and
+    /// passing one to the other silently answers "no intent" for every job,
+    /// which reads as a correct refusal right up until a legitimate commit is
+    /// refused too.
+    pub fn live_for_job(&self, job_id: &str) -> Result<Option<CommitIntent>, StoreError> {
+        let c = self.pool.get()?;
+        Ok(c.query_row(
+            &format!(
+                "SELECT {INTENT_COLUMNS} FROM commit_intent
+                 WHERE job_id = ?1 AND state = 'live'"
+            ),
+            [job_id],
             CommitIntent::from_row,
         )
         .optional()?)
