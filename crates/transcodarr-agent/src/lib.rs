@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/lib.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: b2947c0e-5d81-4f36-a7b0-6e13df852a94
-// last-edited: 2026-08-02
+// last-edited: 2026-08-05
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! transcodarr worker agent.
@@ -12,6 +12,7 @@
 
 pub mod commit;
 pub mod executor;
+pub mod identity;
 pub mod journal;
 pub mod preflight;
 pub mod probe_caps;
@@ -19,6 +20,7 @@ pub mod workarea;
 
 pub use commit::{CommitRequest, CommitRitual, Resolution, SourceGuard};
 pub use executor::{Execution, Executor, ExecutorConfig, Progress, ProgressTailer};
+pub use identity::{agent_uid, boot_id};
 pub use journal::{IntentJournal, IntentPhase, IntentRecord};
 pub use probe_caps::{TrialOutcome, capability_for, classify};
 pub use workarea::WorkArea;

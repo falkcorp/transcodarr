@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/runner.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 2c94ea70-58d1-4b36-9f82-0a7e14b6d539
-// last-edited: 2026-08-03
+// last-edited: 2026-08-05
 //! Single-node execution: take a job, encode it, validate it, install it.
 //!
 //! No dispatcher, no agents, no gRPC. The agent runs in-process, which is what
@@ -20,9 +20,9 @@
 
 use std::sync::Arc;
 
+use transcodarr_agent::identity::{agent_uid, boot_id};
 use transcodarr_agent::{
-    CommitRequest, CommitRitual, Executor, ExecutorConfig, IntentJournal, Resolution, SourceGuard,
-    WorkArea,
+    CommitRequest, CommitRitual, Executor, ExecutorConfig, Resolution, SourceGuard, WorkArea,
 };
 use transcodarr_core::job::JobState;
 use transcodarr_core::plan::JobPaths;
@@ -107,9 +107,12 @@ impl LocalRunner {
         let work = WorkArea::open(
             std::path::Path::new(&library.work_dir),
             &agent_uid(),
-            &boot_id(),
+            boot_id(),
         )?;
-        let journal = IntentJournal::open(&work.path().join("journal"))?;
+        // Not `work.path()`: the journal is stable per installation, so a
+        // restart can still find what the previous instance was doing. See the
+        // module documentation on `WorkArea`.
+        let journal = work.open_journal()?;
         let ritual = CommitRitual::new(journal, work.clone());
 
         for (job_id, resolution) in ritual.recover_all()? {
@@ -376,37 +379,6 @@ impl LocalRunner {
         )?;
         Ok(())
     }
-}
-
-/// A stable identity for this agent installation.
-///
-/// Falls back to the hostname, then to a constant. It only has to be stable
-/// across restarts and distinct between machines — it namespaces a work area,
-/// it does not authenticate anything.
-fn agent_uid() -> String {
-    std::env::var("TRANSCODARR_AGENT_UID")
-        .ok()
-        .or_else(hostname)
-        .unwrap_or_else(|| "local".to_string())
-}
-
-/// An identity for *this run* of the agent.
-///
-/// Distinct per process, so a restarted agent cannot mistake the leftovers of
-/// its own previous life for work still in flight.
-fn boot_id() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("pid-{}", std::process::id()))
-}
-
-fn hostname() -> Option<String> {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
