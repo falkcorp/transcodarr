@@ -1,7 +1,7 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.7.0 -->
+<!-- version: 3.8.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
-<!-- last-edited: 2026-08-04 -->
+<!-- last-edited: 2026-08-05 -->
 
 # Implementation handoff — transcodarr
 
@@ -84,14 +84,15 @@ Two lessons worth keeping:
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
-| 4 — Protocol, one agent, dispatcher | **In progress.** The server side of the transport is done: codegen, `AgentRepo`, `Register` and the `Connect` stream, all covered over a real gRPC channel. **`ConnectClient` does not exist and no `JobAssignment` is ever sent** — there is no dispatch loop, so an agent connects, is accounted for, and sits idle. |
+| 4 — Protocol, one agent, dispatcher | **In progress.** Both sides of the transport are done: codegen, `AgentRepo`, `Register`, the `Connect` stream, and as of 2026-08-05 `ConnectClient` and `LocalWorker`. **No `JobAssignment` is ever sent** — there is no dispatch loop and no `serve` verb, so nothing runs end-to-end against the real server yet. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
 | 7 — Hardening | Not started. |
 
 `transcodarr-core` is finished: `paths`, `plan`, `preset`, `probe`, `validate`,
-`capability`, `failure`, `facts`, `policy`. `transcodarr-agent` exists with
-`preflight` only. `transcodarr-store` has `db` (schema, migrations, pragma
+`capability`, `failure`, `facts`, `policy`. `transcodarr-agent` has the work
+area, journal, ritual, executor, preflight, capability trial, `identity`, and
+the transport client. `transcodarr-store` has `db` (schema, migrations, pragma
 verification, durability probe) and `writer` (lanes, per-op `SAVEPOINT`, poison
 tracking).
 
@@ -302,15 +303,39 @@ commit is refused too — and one test merged in #57 was green for exactly that
 reason. `live_for_job` exists now. When a lookup can only ever return `None`,
 every negative test passes and proves nothing.
 
+**`ConnectClient` and `LocalWorker` have landed** (PR #63), on top of two
+defects the work uncovered in what it was standing on (PR #62 — see below).
+Ten tests dial a real tonic server on a loopback port; the *server* is a fake,
+because `transcodarr-server` links SQLite and an agent test depending on it
+would quietly make the agent untestable on the Windows node. Three of the ten
+drive the real `LocalWorker` against real files, two of those with real ffmpeg.
+
+Four things not to relitigate, each of which loses media if inverted:
+
+- **One `boot_id` per process, reused across every reconnect.** From
+  `identity::boot_id()`, a `OnceLock`. A fresh one per attempt turns every
+  network blip into an epoch bump.
+- **`live_intents` out with `Register`, `unknown_job_ids` resolved before the
+  stream opens.** Recovering first clears the records, so the replay goes out
+  empty, the answer comes back empty, and the test proves nothing.
+- **`Worker::on_startup` is the *other* recovery path, and it is not optional.**
+  `on_unknown_intents` covers only what the server disowns; the ordinary crash
+  has a live ledger row and is named by nobody. It runs once per process, never
+  per reconnect — a reconnect can land while a commit is between its two
+  renames, and recovery there would restore the original out from under the
+  ritual installing over it. This was caught only because a reviewer asked what
+  called `recover()`: the answer was nothing.
+- **No grant, a refusal, a dead stream and a timeout are one answer.** Nothing
+  is installed and the source is untouched. Permission is never inferred from
+  silence.
+
 **Remaining, in dependency order:**
 
-1. **`ConnectClient`** with `ReconnectPolicy` — registers, replays its
-   `IntentJournal`, runs assignments through the existing `Executor` and
-   `CommitRitual`. It must keep its `boot_id` across reconnects, or every
-   network blip fences work that is still running fine.
-3. **`serve` and `agent connect`** CLI verbs, and the loop tying
-   `ScheduleEngine` → `Dispatcher` → session outbound → `Reconciler`.
-4. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
+1. **`serve` and `agent connect`** CLI verbs, and the loop tying
+   `ScheduleEngine` → `Dispatcher` → session outbound → `Reconciler`. The
+   dispatcher, capacity ledger, reconciler and schedule engine all exist and
+   nothing calls them.
+2. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
    a `FakeAgent` load test, then 24 concurrent audio jobs sustained on U1. The
    milestone does **not** require the GPU node — Phase 4 is audio-class only.
 
@@ -325,6 +350,28 @@ dependency: it has to stay copyable to the Windows node without dragging SQLite
 along. Check with `cargo tree -p transcodarr-agent -i transcodarr-store` rather
 than by eye — a shared proto crate makes a transitive dependency easy to add by
 accident.
+
+### Two defects the client work uncovered (PR #62)
+
+Both were in shipped, tested code, and neither had a failing test to find:
+
+1. **The intent journal could never be recovered.** It was opened at
+   `<work_dir>/<agent_uid>/<boot_id>/journal`, inside the work area's
+   per-process namespace. A new `boot_id` is a new directory, so
+   `recover_all()` read an empty one and found nothing — every time, in exactly
+   the case the journal exists for. The fsync-before-every-step discipline was
+   intact and unreachable. It now lives at `<work_dir>/<agent_uid>/.journal` via
+   `WorkArea::open_journal()`, which also adopts records left by the old layout.
+   The leading dot is load-bearing: no `boot_id` can sanitise to that name.
+2. **`boot_id` was the machine's, not the process's.** It read
+   `/proc/sys/kernel/random/boot_id`, which changes when the *machine* reboots,
+   while its own doc comment said "distinct per process". On Linux a restarted
+   agent resumed its epoch and nothing was fenced; on macOS the read failed and
+   it fell back to `pid-N`, so the same code fenced correctly on a laptop and
+   not on the machine that matters.
+
+The pattern in both: a check that could not fail, and a platform difference that
+kept the laptop honest and the server not.
 
 ### Phases 5-7 — not started
 
@@ -357,7 +404,7 @@ redirect). The local clone is still at `~/repos/github.com/jdfalk/transcoderr`
 — only the repo and crate were renamed.
 
 `main` is green, and as of 2026-08-04 that is verified by CI rather than only on
-one laptop: **464 tests passing**, `cargo fmt -- --check`,
+one laptop: **484 tests passing**, `cargo fmt -- --check`,
 `cargo clippy --all-targets --all-features -- -D warnings`, `cargo build
 --release`, `buf lint`, `buf breaking` against `main`, and markdownlint.
 
@@ -369,15 +416,17 @@ Six crates:
 | `transcodarr-store` | Schema, writer, read pool, seven of eleven repositories. |
 | `transcodarr-proto` | Wire contract, version gate, codegen, conversion boundary. |
 | `transcodarr-server` | Scanner, prober, evaluator, dispatcher, reconciler, schedule engine, capacity ledger, hardening, and the agent session. |
-| `transcodarr-agent` | Work area, journal, commit ritual, executor, preflight, capability trial. **No transport client.** |
+| `transcodarr-agent` | Work area, journal, commit ritual, executor, preflight, capability trial, identity, and the transport client. |
 | `transcodarr-cli` | `local` and `admin` verbs. **No `serve`, no `agent connect`.** |
 
-The last two rows are the whole of what is left in Phase 4.
+The last row, plus the dispatch loop, is what is left in Phase 4.
 
 The last eight pull requests, most recent first:
 
 | PR | What |
 | --- | --- |
+| #63 | `ConnectClient` and `LocalWorker`: the agent speaks the transport |
+| #62 | The journal could never be recovered, and `boot_id` was the machine's |
 | #60 | Handoff: the `Connect` stream and the lookup bug it exposed |
 | #59 | The `Connect` stream and `AgentTable`; the fence enforced over the wire |
 | #57 | `AgentSession`: registration served over gRPC |
@@ -640,44 +689,39 @@ them is expensive.
 
 ## First action for the next session
 
-**`ConnectClient`, the agent side of the transport.** Everything the server
-needs is in place and covered; nothing on the agent knows how to talk to it.
+**`serve` and `agent connect`, then the dispatch loop.** Both ends of the
+transport exist and are covered. What does not exist is anything that starts
+them, or anything that decides a `JobAssignment` — so a real agent can register
+with a real server, be accounted for, and sit idle forever.
 
-Read § *Phase 4 — in progress* above first, for the ordered list, the three
-codegen facts and the `Connect` semantics that will otherwise each cost an hour
-to rediscover.
+Read § *Phase 4 — in progress* above first, for the three codegen facts, the
+`Connect` semantics and the four client rules that will otherwise each cost an
+hour to rediscover.
 
-What it has to do:
+In order:
 
-1. Register, and keep the `fencing_epoch` and `boot_id` it was issued. **The
-   `boot_id` must be generated once per process and reused across every
-   reconnect** — a fresh one on each attempt turns every network blip into an
-   epoch bump that fences work still running perfectly well.
-2. Replay the fsynced `IntentJournal` in the `Register` call, before accepting
-   anything, and act on the `unknown_job_ids` that come back.
-3. Open the stream with `x-agent-id` and `x-agent-epoch` metadata. There is no
-   identity in `AgentMessage`; see the `session.rs` module documentation.
-4. Heartbeat on a timer, carrying the running set, and honour `Revoke` and
-   `Drain`.
-5. Reconnect with backoff, re-registering each time — the server resumes the
-   epoch for the same `boot_id`, so a reconnect is cheap and correct.
+1. **`transcodarr serve`** — build the `Runtime`, an `AgentSession` over the
+   store, and serve it with tonic. The `AgentTable` it holds is what the
+   dispatch loop reads, so pass one in with `AgentSession::with_fleet`.
+2. **`transcodarr agent connect`** — build a `LocalWorker` over a `WorkArea`,
+   `work.open_journal()` and an `Executor`, hand it to a `ConnectClient`, and
+   run it. The capability document is the open question: `probe_caps` builds
+   decoder capabilities and `preflight` knows the mounts, but nothing yet
+   assembles a whole `pb::Capability` from a machine.
+3. **The dispatch loop** tying `ScheduleEngine` → `Dispatcher` →
+   `AgentTable::send` → `Reconciler`. Every one of those exists, is tested, and
+   has no caller.
 
-`crates/transcodarr-server/tests/connect.rs` is the pattern to copy: a real
-tonic server on a loopback port, dialled with the generated client. Note
-`AgentServiceClient::new(channel)` rather than a `connect(dst)` constructor.
+Then the end-to-end proof, which is provable on the Mac with no media and no
+server access: one audio job through register → connect → assign → result →
+`RequestCommit` → `ReportCommit` → reconcile, with a stale-epoch `ReportCommit`
+in the same test rejected and the job left untouched.
 
 **Do not let `transcodarr-agent` acquire a `transcodarr-store` dependency.** It
 has to stay copyable to the Windows node without dragging SQLite along. Check
-with `cargo tree -p transcodarr-agent -i transcodarr-store` rather than by eye;
-it currently holds, and a shared proto crate makes a transitive dependency easy
-to add by accident.
-
-After that comes `serve` and `agent connect`, then the dispatch loop — and only
-then can the end-to-end proof be written: one audio job through register →
-connect → assign → result → `RequestCommit` → `ReportCommit` → reconcile, with
-a stale-epoch `ReportCommit` in the same test rejected and the job left
-untouched. All of that is provable on the Mac with no media and no server
-access.
+with `cargo tree -p transcodarr-agent -i transcodarr-store --edges normal`
+rather than by eye — it currently reports no such package in the graph at all,
+which is the answer you want to keep seeing.
 
 The real-hardware milestone (24 concurrent audio jobs on U1) comes last, and
 `transcodarr admin summary` on the server will say whether the Phase 2 probe run
