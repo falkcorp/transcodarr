@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/executor.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 8e5a04cb-71f2-4d63-9a80-3c6b1e97fa25
-// last-edited: 2026-08-03
+// last-edited: 2026-08-05
 //! Running ffmpeg, watching it, and judging what it produced.
 //!
 //! Three decisions here are load-bearing, and each came from something that
@@ -169,6 +169,11 @@ pub struct Execution {
 }
 
 /// Runs encodes and validates their output.
+///
+/// `Clone` because an encode runs on a blocking thread: the config is two
+/// binary paths and a timeout, so a clone is cheaper than the synchronisation
+/// sharing it would need.
+#[derive(Debug, Clone)]
 pub struct Executor {
     config: ExecutorConfig,
 }
@@ -197,9 +202,28 @@ impl Executor {
         plan: &EncodePlan,
         paths: &JobPaths,
         progress_path: &Path,
-        mut on_progress: impl FnMut(&Progress),
+        on_progress: impl FnMut(&Progress),
     ) -> Result<Execution, AgentError> {
         let argv = self.argv_for(plan, paths);
+        self.run_argv(&argv, &paths.output, progress_path, on_progress)
+    }
+
+    /// Run an argv composed elsewhere.
+    ///
+    /// This is what a dispatched job uses: `JobAssignment.argv` is built
+    /// server-side and the agent does not compose it. Keeping one
+    /// implementation under both entry points is deliberate — an agent that
+    /// rebuilt the command locally could encode to a plan the server never
+    /// authorised, and the difference would not show up until the output was
+    /// already installed.
+    pub fn run_argv(
+        &self,
+        argv: &[String],
+        output: &Path,
+        progress_path: &Path,
+        mut on_progress: impl FnMut(&Progress),
+    ) -> Result<Execution, AgentError> {
+        let argv = argv.to_vec();
         let tailer = ProgressTailer::new(progress_path.to_path_buf());
         let _ = std::fs::remove_file(progress_path);
 
@@ -264,9 +288,7 @@ impl Executor {
 
         let stderr_tail = drain.join().unwrap_or_default();
         let progress = tailer.read();
-        let output_bytes = std::fs::metadata(&paths.output)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let output_bytes = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
         Ok(Execution {
             argv,

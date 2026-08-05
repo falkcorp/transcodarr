@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/commit.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 5d2b90f7-6c41-4a83-9e50-1b74af26c8d3
-// last-edited: 2026-08-03
+// last-edited: 2026-08-05
 //! The commit ritual: installing a replacement without ever losing the source.
 //!
 //! The whole point is a single invariant, and it is worth stating precisely
@@ -190,6 +190,12 @@ pub struct CommitRequest {
 }
 
 /// Performs, and recovers, installs.
+///
+/// `Clone` because the ritual runs on a blocking thread. Both halves are
+/// path handles rather than open resources -- a clone names the same journal
+/// directory, it does not make a second one, and durability comes from fsync
+/// on every write rather than from single ownership of this struct.
+#[derive(Debug, Clone)]
 pub struct CommitRitual {
     journal: IntentJournal,
     work_area: WorkArea,

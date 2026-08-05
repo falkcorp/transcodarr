@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/lib.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: b2947c0e-5d81-4f36-a7b0-6e13df852a94
 // last-edited: 2026-08-05
 #![deny(unsafe_code)]
@@ -10,6 +10,7 @@
 //! `transcodarr-store`. An agent must be copyable to the Windows node without
 //! dragging SQLite along with it.
 
+pub mod client;
 pub mod commit;
 pub mod executor;
 pub mod identity;
@@ -17,13 +18,18 @@ pub mod journal;
 pub mod preflight;
 pub mod probe_caps;
 pub mod workarea;
+pub mod worker;
 
+pub use client::{
+    ClientConfig, ClientError, ConnectClient, Link, ReconnectPolicy, Shutdown, Worker,
+};
 pub use commit::{CommitRequest, CommitRitual, Resolution, SourceGuard};
 pub use executor::{Execution, Executor, ExecutorConfig, Progress, ProgressTailer};
 pub use identity::{agent_uid, boot_id};
 pub use journal::{IntentJournal, IntentPhase, IntentRecord};
 pub use probe_caps::{TrialOutcome, capability_for, classify};
 pub use workarea::WorkArea;
+pub use worker::LocalWorker;
 
 use thiserror::Error;
 
