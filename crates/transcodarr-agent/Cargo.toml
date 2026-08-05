@@ -1,7 +1,7 @@
 # file: crates/transcodarr-agent/Cargo.toml
-# version: 1.0.0
+# version: 1.1.0
 # guid: e6b09d41-7a52-4c38-91fe-04d7b3a86152
-# last-edited: 2026-08-02
+# last-edited: 2026-08-05
 
 [package]
 name = "transcodarr-agent"
@@ -13,14 +13,23 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-# Depends on core only. Never on transcodarr-store: an agent must be copyable to
-# the Windows node without dragging SQLite along.
+# Depends on core and proto only. Never on transcodarr-store: an agent must be
+# copyable to the Windows node without dragging SQLite along. transcodarr-proto
+# is safe here -- it links tonic and core, and nothing that reaches sqlite.
+# Check with `cargo tree -p transcodarr-agent -i transcodarr-store --edges normal`
+# rather than by eye; a shared crate makes a transitive dependency easy to add
+# by accident.
 [dependencies]
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
+transcodarr-proto = { path = "../transcodarr-proto" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

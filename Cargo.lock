@@ -1821,7 +1821,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
  "transcodarr-core",
+ "transcodarr-proto",
 ]
 
 [[package]]
