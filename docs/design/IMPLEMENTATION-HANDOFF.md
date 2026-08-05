@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.6.0 -->
+<!-- version: 3.7.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-04 -->
 
@@ -15,6 +15,33 @@ Read in this order:
    **Phased Delivery Plan** (Phase 0–7) is the execution roadmap.
 3. `docs/design/synthesis-decisions.md` — the binding naming contract. SQL
    tables, Rust types, RPCs, metrics, job states. **Treat as authoritative.**
+
+## The standing goal
+
+**Get everything possible done that does not genuinely require the owner.**
+Where a decision has a sane default, take it, state which default you took, and
+keep going. Do not stop to ask what can be reasonably assumed.
+
+Bring the same standard to what you find along the way:
+
+- **When you find a flaw, fix it.** Do not file it, do not note it for later,
+  and do not route around it. This applies to whatever you are standing on, not
+  only to the thing you set out to build — the two defects that had silently
+  broken this repository for weeks (see below) were both found while starting
+  unrelated work.
+- **When you find code or documentation that is out of date, correct it.** A
+  stale document is worse than a missing one: it is believed. This file has
+  twice claimed a phase was unstarted while its code was merged, and once
+  claimed no orchestrator code existed at all after five subsystems had landed.
+- **A check that cannot fail is decoration.** Before trusting one, break the
+  thing it watches and confirm it goes red. That standard already caught a crash
+  matrix that could not fail, a lint that had never run, and a repository lookup
+  that could only ever return `None` — which made every negative test around it
+  pass while proving nothing.
+
+Stop and ask only when proceeding would be unsafe, irreversible, or would waste
+substantial work if the assumption turned out wrong. Otherwise: assume, act,
+and say clearly in the report what you assumed.
 
 ## Read this first: CI was not running
 
@@ -326,21 +353,38 @@ per session, meeting each documented Milestone before moving on.
 ## Current state
 
 `falkcorp/transcodarr` (renamed from `transcoderr` on 2026-07-31; old URLs
-redirect). `main` is green: `cargo build`, `cargo fmt --check`,
-`cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test`
-(16 passed / 0 failed / 2 ignored) all pass.
+redirect). The local clone is still at `~/repos/github.com/jdfalk/transcoderr`
+— only the repo and crate were renamed.
 
-Shipped so far — design plus groundwork only, **no orchestrator code exists yet**:
+`main` is green, and as of 2026-08-04 that is verified by CI rather than only on
+one laptop: **464 tests passing**, `cargo fmt -- --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, `cargo build
+--release`, `buf lint`, `buf breaking` against `main`, and markdownlint.
+
+Six crates:
+
+| Crate | State |
+| --- | --- |
+| `transcodarr-core` | Complete. Pure: no tokio, no rusqlite, no tonic. |
+| `transcodarr-store` | Schema, writer, read pool, seven of eleven repositories. |
+| `transcodarr-proto` | Wire contract, version gate, codegen, conversion boundary. |
+| `transcodarr-server` | Scanner, prober, evaluator, dispatcher, reconciler, schedule engine, capacity ledger, hardening, and the agent session. |
+| `transcodarr-agent` | Work area, journal, commit ritual, executor, preflight, capability trial. **No transport client.** |
+| `transcodarr-cli` | `local` and `admin` verbs. **No `serve`, no `agent connect`.** |
+
+The last two rows are the whole of what is left in Phase 4.
+
+The last eight pull requests, most recent first:
 
 | PR | What |
 | --- | --- |
-| #11 | The three design documents |
-| #12 | Rename `transcoderr` → `transcodarr` (crate, binary, repo) |
-| #13 | Four CLI correctness bugs fixed (suite went 12/4 → 16/0) |
-| #14 | `clippy.toml` repaired; lint had been silently dead |
-
-The existing CLI is still a single 508-line `src/main.rs` with `info`,
-`transcode` and `batch`. Phase 1 dissolves it into a workspace.
+| #60 | Handoff: the `Connect` stream and the lookup bug it exposed |
+| #59 | The `Connect` stream and `AgentTable`; the fence enforced over the wire |
+| #57 | `AgentSession`: registration served over gRPC |
+| #56 | `AgentRepo`; the fencing epoch survives a server restart |
+| #55 | Handoff corrected — the phase table had said Phase 4 was not started |
+| #54 | gRPC codegen, the conversion boundary, buf contract checks |
+| #53 | **CI repaired, and the schema it could not see committed** |
 
 ## Locked decisions
 
@@ -354,6 +398,9 @@ is wrong, say so and proceed under it unless told otherwise.
 - **Autonomy.** Run each phase end-to-end: implement, meet the phase's
   documented **Milestone** criteria, open and merge the PR, report, continue.
   Stop only when a milestone genuinely fails or the architecture must change.
+  Reaffirmed 2026-08-04 and widened — see § *The standing goal*: take sane
+  defaults rather than asking, and fix flaws and stale documentation wherever
+  they are found rather than only where the current task points.
 - **Merging.** Standing permission to merge tested work without asking. The gate
   is *evidence* — CI green, a real test run, a verified build — not permission.
   Renaming or deleting a repo is not covered by this.
@@ -593,16 +640,45 @@ them is expensive.
 
 ## First action for the next session
 
-**`Connect`, the bidi stream.** Read § *Phase 4 — in progress* above for the
-ordered list and the three codegen facts that will otherwise cost an hour each.
-`crates/transcodarr-server/tests/register.rs` is the pattern to extend — a real
-tonic server on a loopback port, dialled with the generated client.
+**`ConnectClient`, the agent side of the transport.** Everything the server
+needs is in place and covered; nothing on the agent knows how to talk to it.
 
-The proof to aim for is one audio job through register → connect → assign →
-result → `RequestCommit` → `ReportCommit` → reconcile, with a stale-epoch
-`ReportCommit` in the same test rejected and the job left untouched. That is
-provable on the Mac with no media and no server access.
+Read § *Phase 4 — in progress* above first, for the ordered list, the three
+codegen facts and the `Connect` semantics that will otherwise each cost an hour
+to rediscover.
 
-The real-hardware milestone (24 concurrent audio jobs on U1) comes after, and
-`transcodarr admin summary` on the server will say whether the Phase 2 probe
-run ever finished.
+What it has to do:
+
+1. Register, and keep the `fencing_epoch` and `boot_id` it was issued. **The
+   `boot_id` must be generated once per process and reused across every
+   reconnect** — a fresh one on each attempt turns every network blip into an
+   epoch bump that fences work still running perfectly well.
+2. Replay the fsynced `IntentJournal` in the `Register` call, before accepting
+   anything, and act on the `unknown_job_ids` that come back.
+3. Open the stream with `x-agent-id` and `x-agent-epoch` metadata. There is no
+   identity in `AgentMessage`; see the `session.rs` module documentation.
+4. Heartbeat on a timer, carrying the running set, and honour `Revoke` and
+   `Drain`.
+5. Reconnect with backoff, re-registering each time — the server resumes the
+   epoch for the same `boot_id`, so a reconnect is cheap and correct.
+
+`crates/transcodarr-server/tests/connect.rs` is the pattern to copy: a real
+tonic server on a loopback port, dialled with the generated client. Note
+`AgentServiceClient::new(channel)` rather than a `connect(dst)` constructor.
+
+**Do not let `transcodarr-agent` acquire a `transcodarr-store` dependency.** It
+has to stay copyable to the Windows node without dragging SQLite along. Check
+with `cargo tree -p transcodarr-agent -i transcodarr-store` rather than by eye;
+it currently holds, and a shared proto crate makes a transitive dependency easy
+to add by accident.
+
+After that comes `serve` and `agent connect`, then the dispatch loop — and only
+then can the end-to-end proof be written: one audio job through register →
+connect → assign → result → `RequestCommit` → `ReportCommit` → reconcile, with
+a stale-epoch `ReportCommit` in the same test rejected and the job left
+untouched. All of that is provable on the Mac with no media and no server
+access.
+
+The real-hardware milestone (24 concurrent audio jobs on U1) comes last, and
+`transcodarr admin summary` on the server will say whether the Phase 2 probe run
+ever finished.
