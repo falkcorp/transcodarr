@@ -1,7 +1,7 @@
 <!-- file: todo.d/README.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: a7e8ce77-97f7-4e11-8522-4c68d2fdb125 -->
-<!-- last-edited: 2026-07-19 -->
+<!-- last-edited: 2026-08-06 -->
 
 # TODO fragments (`todo.d/`)
 
@@ -45,8 +45,16 @@ fragments) — adding a task is optional, not something to enforce on every PR.
 - **One fragment per logical task** (or per tight cluster of related subtasks).
 - Fragments are **exempt from the file-header rule** — do not add the
   `file`/`version`/`guid` header. The body is folded into `TODO.md` verbatim, so
-  a header would leak into the assembled document. They are also excluded from
-  markdownlint and prettier via `.markdownlintignore` / `.prettierignore`.
+  a header would leak into the assembled document. What makes that exemption
+  safe is `MD041` (first line must be a top-level heading) being disabled
+  repo-wide in [`.markdownlint-cli2.jsonc`](../.markdownlint-cli2.jsonc), for
+  the opposite reason — every _other_ file opens with the header rather than a
+  heading.
+- Fragments **are** linted. The CI job globs `**/*.md` and the only exclusions
+  are the ones listed in `.markdownlint-cli2.jsonc`, so keep a fragment clean or
+  it fails a PR for a file that is about to be deleted. Prettier is not wired
+  into CI at all. (Through v1.0.0 this document claimed exclusion via
+  `.markdownlintignore` and `.prettierignore`; neither file has ever existed.)
 - A fragment that is **entirely HTML comments** is treated as an intentional
   no-op: it is deleted on collect without contributing anything. Comment out a
   fragment rather than deleting it if you want the collector to drop it quietly.
