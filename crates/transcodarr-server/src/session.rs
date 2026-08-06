@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
-// last-edited: 2026-08-04
+// last-edited: 2026-08-06
 //! Registration and the agent stream: the server side of the transport.
 //!
 //! This is where an agent asks permission, and the only place a `fencing_epoch`
@@ -59,7 +59,9 @@ use transcodarr_core::capability::Capability;
 use transcodarr_core::job::JobState;
 use transcodarr_proto::handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
-use transcodarr_store::repo::{AgentRegistration, AgentRepo, CommitIntentRepo, JobRepo};
+use transcodarr_store::repo::{
+    AgentRegistration, AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo,
+};
 use transcodarr_store::writer::{WriteLane, Writer};
 
 use crate::fleet::AgentTable;
@@ -95,6 +97,7 @@ pub struct AgentSession {
     agents: AgentRepo,
     intents: CommitIntentRepo,
     jobs: JobRepo,
+    libraries: LibraryRepo,
     fleet: AgentTable,
     writer: Arc<Writer>,
     gate: VersionGate,
@@ -124,6 +127,7 @@ impl AgentSession {
         agents: AgentRepo,
         intents: CommitIntentRepo,
         jobs: JobRepo,
+        libraries: LibraryRepo,
         writer: Arc<Writer>,
         auth_token: Option<String>,
     ) -> Self {
@@ -131,6 +135,7 @@ impl AgentSession {
             agents,
             intents,
             jobs,
+            libraries,
             fleet: AgentTable::new(),
             writer,
             gate: VersionGate::default(),
@@ -484,6 +489,63 @@ impl pb::agent_service_server::AgentService for AgentSession {
     }
 }
 
+/// Whether the agent's validation report says the output passed.
+///
+/// An unreadable report is a **failure**, never a pass. The report is the only
+/// evidence that the output is not the 1 KB truncated artefact the AV1/NVDEC
+/// path produces, and treating "cannot tell" as "fine" installs exactly the
+/// outputs the gate exists to reject.
+fn validation_passed(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("passed").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Where a job goes when its commit resolves.
+///
+/// Always *from* `Committing`: the grant moved it there, and the state machine
+/// has no edge out of `Verifying` to any terminal state. That is not an
+/// accident to work around — `Committing` is precisely the window in which the
+/// destination may have been touched, and a job that reached a terminal state
+/// without passing through it would be one the reconciler never knew to treat
+/// as ambiguous.
+///
+/// `installed` is the only success. Everything else left the source in place —
+/// a *safe* outcome, and still a job that did not do what it was dispatched to
+/// do, so it fails rather than quietly counting as done. `needs_operator` is
+/// neither: nobody knows what is on disk, and the one thing that must not
+/// happen is a machine deciding.
+fn outcome_of(resolution: &str) -> (JobState, &'static str) {
+    let to = match resolution {
+        "installed" => JobState::Succeeded,
+        "needs_operator" => JobState::NeedsOperator,
+        _ => JobState::Failed,
+    };
+    (to, resolution_code(resolution))
+}
+
+/// A stable reason code for the job event ledger.
+fn resolution_code(resolution: &str) -> &'static str {
+    match resolution {
+        "installed" => "installed",
+        "source_intact" => "not_installed",
+        "source_restored" => "restored",
+        "needs_operator" => "ambiguous_commit",
+        _ => "unknown_resolution",
+    }
+}
+
+/// The last 500 characters, for an operator-facing message.
+fn tail(s: &str) -> String {
+    if s.len() <= 500 {
+        return s.to_string();
+    }
+    s.chars()
+        .skip(s.chars().count().saturating_sub(500))
+        .collect()
+}
+
 /// Read the agent's identity from the stream's metadata.
 ///
 /// See the module documentation for why this is not a message in the schema.
@@ -535,16 +597,7 @@ impl AgentSession {
                 tracing::trace!(agent = %agent_id, job = %p.job_id, out_time_us = p.out_time_us, "progress");
                 Ok(())
             }
-            pb::agent_message::Body::Result(r) => {
-                // Recorded, not acted on. Completing an assignment is the
-                // dispatch loop's job, and there is no dispatch loop yet -- so
-                // this build must not pretend a job finished.
-                tracing::info!(
-                    agent = %agent_id, job = %r.job_id, exit_code = r.exit_code,
-                    "job result received, but this build does not yet dispatch work"
-                );
-                Ok(())
-            }
+            pb::agent_message::Body::Result(r) => self.on_result(agent_id, epoch, r).await,
             pb::agent_message::Body::DrainAck(ack) => {
                 tracing::info!(agent = %agent_id, still_running = ack.still_running.len(), "drain acknowledged");
                 Ok(())
@@ -600,6 +653,107 @@ impl AgentSession {
         Ok(())
     }
 
+    /// An agent reporting how an encode ended.
+    ///
+    /// This moves the job to `Verifying` or to `Failed`, and it is the only
+    /// place that reads the agent's validation verdict. The verdict itself is
+    /// produced by `transcodarr-core::validate` on the agent — the same code
+    /// this crate links — so it is a re-run of the server's own rules on the
+    /// machine that has the file, not a second opinion from a second
+    /// implementation.
+    ///
+    /// **A failure releases the commit intent.** The intent is what reserves
+    /// the destination path; a job that failed while holding one blocks its own
+    /// file forever, because the next attempt's intent collides with the unique
+    /// index over live intents and can never be written.
+    async fn on_result(&self, agent_id: &str, epoch: i64, r: pb::JobResult) -> Result<(), Status> {
+        let job = match self.jobs.get(&r.job_id) {
+            Ok(j) => j,
+            Err(transcodarr_store::StoreError::NotFound { .. }) => {
+                tracing::warn!(agent = %agent_id, job = %r.job_id, "result for an unknown job");
+                return Ok(());
+            }
+            Err(e) => return Err(Status::internal(format!("job lookup failed: {e}"))),
+        };
+
+        // The same fence as everywhere else. A result from an instance the
+        // server has already replaced describes work that was revoked, and
+        // acting on it would let a superseded agent finish a job that has since
+        // been handed to somebody else.
+        if job.agent_id.as_deref() != Some(agent_id) || job.fencing_epoch != epoch {
+            tracing::warn!(
+                agent = %agent_id, job = %r.job_id, epoch,
+                held_by = ?job.agent_id, job_epoch = job.fencing_epoch,
+                "ignoring a result from an agent or epoch this job is not held by"
+            );
+            return Ok(());
+        }
+
+        let passed = r.exit_code == 0 && validation_passed(&r.validation_json);
+
+        // Assigned -> Running is not a no-op even though the encode is over:
+        // the state machine has no Assigned -> Verifying edge, and inventing
+        // one would let a job reach Verifying without ever having been recorded
+        // as started.
+        if job.state == JobState::Assigned {
+            self.write(JobRepo::transition_op(
+                r.job_id.clone(),
+                JobState::Assigned,
+                JobState::Running,
+                None,
+                None,
+            ))
+            .await?;
+        }
+
+        if passed {
+            self.write(JobRepo::transition_op(
+                r.job_id.clone(),
+                JobState::Running,
+                JobState::Verifying,
+                None,
+                None,
+            ))
+            .await?;
+            tracing::info!(agent = %agent_id, job = %r.job_id, bytes = r.output_bytes,
+                "encode accepted; awaiting the commit request");
+            return Ok(());
+        }
+
+        tracing::warn!(
+            agent = %agent_id, job = %r.job_id, exit_code = r.exit_code,
+            stderr = %tail(&r.stderr_tail), "encode rejected"
+        );
+        self.release_intent(&r.job_id, job.attempt).await;
+        self.write(JobRepo::transition_op(
+            r.job_id.clone(),
+            JobState::Running,
+            JobState::Failed,
+            Some("validation_failed".into()),
+            Some(tail(&r.stderr_tail)),
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Release the destination a job was holding.
+    ///
+    /// Best-effort and logged rather than fatal: the alternative is refusing to
+    /// record that a job failed because the tidy-up failed, which leaves the
+    /// job in flight as well as the intent.
+    async fn release_intent(&self, job_id: &str, attempt: i64) {
+        if let Err(e) = self
+            .write(CommitIntentRepo::resolve_op(
+                format!("{job_id}:{attempt}"),
+                "abandoned".to_string(),
+            ))
+            .await
+        {
+            tracing::error!(job = %job_id, error = %e,
+                "could not release the commit intent; this destination stays reserved");
+        }
+    }
+
     /// An agent asking permission to install.
     ///
     /// Granted only against a live intent the server itself recorded, held by
@@ -615,6 +769,25 @@ impl AgentSession {
         let (granted, reason, trash_path) = self.judge_commit(agent_id, epoch, &req)?;
         if !granted {
             tracing::warn!(agent = %agent_id, job = %req.job_id, %reason, "commit refused");
+        } else {
+            // Moved before the grant is sent, not after the report comes back.
+            // `Committing` is the state the reconciler refuses to guess about,
+            // and the window it must cover starts the moment the agent is told
+            // it may touch the destination -- not when it tells us it did.
+            // There is no Verifying -> Succeeded edge for exactly this reason.
+            if let Err(e) = self
+                .write(JobRepo::transition_op(
+                    req.job_id.clone(),
+                    JobState::Verifying,
+                    JobState::Committing,
+                    None,
+                    None,
+                ))
+                .await
+            {
+                tracing::error!(job = %req.job_id, error = %e,
+                    "could not mark the job as committing");
+            }
         }
         self.fleet.send(
             agent_id,
@@ -681,7 +854,27 @@ impl AgentSession {
             ));
         }
 
-        Ok((true, String::new(), intent.final_path))
+        // Where the original goes -- NOT the destination. Handing back
+        // `final_path` here would have the ritual rename the original onto
+        // itself (a silent no-op) and then overwrite it with the replacement:
+        // the file the trash exists to preserve, destroyed by the step meant to
+        // preserve it. The path below the library root is kept, so two shows
+        // with the same episode name do not collide in the trash.
+        let job = self
+            .jobs
+            .get(&req.job_id)
+            .map_err(|e| Status::internal(format!("job lookup failed: {e}")))?;
+        let library = self
+            .libraries
+            .get(&job.library_id)
+            .map_err(|e| Status::internal(format!("library lookup failed: {e}")))?;
+
+        let trash = transcodarr_core::paths::trash_path_for(
+            std::path::Path::new(&library.trash_dir),
+            std::path::Path::new(&library.root_path),
+            std::path::Path::new(&intent.final_path),
+        );
+        Ok((true, String::new(), trash.display().to_string()))
     }
 
     /// An agent reporting how a commit ended.
@@ -727,7 +920,28 @@ impl AgentSession {
             rep.resolution.clone(),
         ))
         .await?;
-        tracing::info!(agent = %agent_id, job = %rep.job_id, resolution = %rep.resolution, "commit resolved");
+
+        // The job follows the ledger. Without this it sits in `Verifying`
+        // forever: the work is done, the file is installed, and the queue still
+        // counts it as in flight until a lease expires and the reconciler
+        // requeues an encode that already happened.
+        let (to, code) = outcome_of(&rep.resolution);
+        if let Err(e) = self
+            .write(JobRepo::transition_op(
+                rep.job_id.clone(),
+                JobState::Committing,
+                to,
+                Some(code.to_string()),
+                Some(rep.detail.clone()),
+            ))
+            .await
+        {
+            tracing::error!(job = %rep.job_id, error = %e, to = ?to,
+                "the commit resolved but the job could not be moved");
+        }
+
+        tracing::info!(agent = %agent_id, job = %rep.job_id, resolution = %rep.resolution,
+            state = ?to, "commit resolved");
         Ok(())
     }
 }

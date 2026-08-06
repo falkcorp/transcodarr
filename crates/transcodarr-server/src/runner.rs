@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/runner.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 2c94ea70-58d1-4b36-9f82-0a7e14b6d539
-// last-edited: 2026-08-05
+// last-edited: 2026-08-06
 //! Single-node execution: take a job, encode it, validate it, install it.
 //!
 //! No dispatcher, no agents, no gRPC. The agent runs in-process, which is what
@@ -277,11 +277,13 @@ impl LocalRunner {
         }
 
         self.transition(&job.id, JobState::Verifying, JobState::Committing)?;
-        let trash = std::path::Path::new(&library.trash_dir).join(
-            source
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| job.id.clone()),
+        // The path below the library root is preserved, so two shows with the
+        // same episode name do not collide in the trash and silently destroy
+        // one another's originals.
+        let trash = transcodarr_core::paths::trash_path_for(
+            std::path::Path::new(&library.trash_dir),
+            std::path::Path::new(&library.root_path),
+            &source,
         );
         // The server-side ledger is written *before* the ritual touches
         // anything. The agent's journal survives a crash of the agent; this row

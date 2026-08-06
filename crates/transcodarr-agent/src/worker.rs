@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/worker.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8c1f37d5-4b0a-49e6-a2f8-13d70b6e5a94
-// last-edited: 2026-08-05
+// last-edited: 2026-08-06
 //! The real [`Worker`]: an assignment in, an installed file or a reason out.
 //!
 //! Everything here already existed and was only reachable through `admin run`.
@@ -318,8 +318,21 @@ impl LocalWorker {
     /// A spec that will not parse fails the job. It is not defaulted: an empty
     /// spec passes every gate, so guessing here would accept exactly the
     /// outputs nobody checked.
+    ///
+    /// **The source duration is re-measured here, the same way the output's
+    /// is.** The server builds the spec from stored facts, whose duration came
+    /// from the container header; validation measures the output's *last packet
+    /// PTS*. Those are not the same quantity — a packet's PTS is the
+    /// presentation time of the final frame, not the end of the file — so
+    /// comparing one against the other invents a shortfall and rejects a
+    /// perfectly good encode. Measured on a 2s remux: header 2.000s, output PTS
+    /// 1.800s, against a tolerance of min(0.5%, 5s) = 10ms.
+    ///
+    /// The agent does this rather than the server because the agent is the one
+    /// holding the file. Re-probing every source on the orchestrator would put
+    /// media I/O back on the machine whose whole job is to stay out of it.
     fn judge(&self, a: &pb::JobAssignment, temp: &Path, exit_code: i32) -> ValidationReport {
-        let spec: ValidationSpec = match serde_json::from_str(&a.validation_spec_json) {
+        let mut spec: ValidationSpec = match serde_json::from_str(&a.validation_spec_json) {
             Ok(s) => s,
             Err(e) => {
                 return ValidationReport {
@@ -330,6 +343,17 @@ impl LocalWorker {
                 };
             }
         };
+        // Only when it can actually be measured. A failed probe leaves the
+        // header duration in place, which is the conservative direction: it can
+        // reject a good output, never accept a truncated one.
+        match self.executor.last_packet_pts_us(Path::new(&a.source_path)) {
+            Ok(Some(measured)) => spec.source_duration_us = measured,
+            Ok(None) => tracing::warn!(job = %a.job_id,
+                "no last-packet PTS for the source; comparing against the header duration"),
+            Err(e) => tracing::warn!(job = %a.job_id, error = %e,
+                "could not measure the source duration; comparing against the header"),
+        }
+
         match self.executor.validate(&spec, temp, exit_code) {
             Ok(report) => report,
             Err(e) => ValidationReport {

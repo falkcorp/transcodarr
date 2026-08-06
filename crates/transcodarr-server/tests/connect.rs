@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/tests/connect.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 1e5b34d8-7f92-4a06-b3c5-82e17ad9604b
-// last-edited: 2026-08-04
+// last-edited: 2026-08-06
 //! The `Connect` stream, over a real gRPC channel.
 //!
 //! Same shape as `register.rs`: a `tonic` server on a loopback port, dialled
@@ -48,6 +48,7 @@ async fn harness() -> Harness {
         AgentRepo::new(pool.clone()),
         CommitIntentRepo::new(pool.clone()),
         JobRepo::new(pool.clone()),
+        LibraryRepo::new(pool.clone()),
         writer.clone(),
         None,
     );
@@ -335,7 +336,16 @@ async fn a_commit_request_against_a_live_intent_is_granted() {
     match next(&mut stream).await.body.unwrap() {
         pb::server_message::Body::CommitGrant(g) => {
             assert!(g.granted, "{}", g.reason);
-            assert_eq!(g.trash_path, "/mnt/tv/j1.mkv");
+            // Where the original goes, under the library's trash directory --
+            // emphatically *not* the destination. Handing back the final path
+            // has the ritual rename the original onto itself and then overwrite
+            // it, destroying the copy the trash exists to preserve. This test
+            // asserted exactly that for two PRs.
+            assert_eq!(g.trash_path, "/mnt/tv/trash/j1.mkv");
+            assert_ne!(
+                g.trash_path, "/mnt/tv/j1.mkv",
+                "the trash path must never be the destination"
+            );
         }
         other => panic!("expected a commit grant, got {other:?}"),
     }
