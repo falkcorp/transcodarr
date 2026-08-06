@@ -1,7 +1,7 @@
 # file: crates/transcodarr-cli/Cargo.toml
 # version: 1.1.0
 # guid: 2e5a9f13-c847-4b02-96d1-8f3b0d64ae57
-# last-edited: 2026-08-01
+# last-edited: 2026-08-06
 
 [package]
 name = "transcodarr-cli"
@@ -20,6 +20,9 @@ homepage.workspace = true
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
 transcodarr-agent = { path = "../transcodarr-agent" }
 transcodarr-server = { path = "../transcodarr-server" }

@@ -1,16 +1,22 @@
 // file: crates/transcodarr-cli/src/main.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 0f9e8d7c-6b5a-4c3d-2e1f-0a9b8c7d6e5f
-// last-edited: 2026-08-01
+// last-edited: 2026-08-06
 //! `transcodarr` command-line entry point.
 //!
-//! The binary is one executable with several faces — `local` today, with
-//! `server`, `agent` and `admin` to follow. Only `local` exists so far; the
-//! grouping is introduced now so the surface is stable before the orchestrator
-//! lands behind it.
+//! The binary is one executable with several faces: `local` for a standalone
+//! transcode, `admin` for operator work, `serve` for the orchestrator and
+//! `agent` for a worker.
+//!
+//! Every face is argument parsing and nothing else. The work lives in
+//! `transcodarr-server` and `transcodarr-agent`, which is what keeps SQL, the
+//! store's connection lifetimes and the single-writer rule out of a crate whose
+//! job is to read a command line.
 
 mod admin;
+mod agent;
 mod local;
+mod serve;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -45,6 +51,13 @@ enum Commands {
     /// Operator diagnostics and maintenance.
     #[command(subcommand)]
     Admin(admin::AdminCommand),
+
+    /// Run the orchestrator.
+    Serve(serve::ServeArgs),
+
+    /// Run a worker, or ask it what it thinks it is.
+    #[command(subcommand)]
+    Agent(agent::AgentCommand),
 }
 
 /// Verbs that sat at the top level before the `local` grouping existed.
@@ -65,11 +78,31 @@ fn rewrite_legacy_verbs(mut args: Vec<String>) -> Vec<String> {
     args
 }
 
+/// Start logging for the long-running verbs.
+///
+/// Only `serve` and `agent`, and deliberately: `local` and `admin` print their
+/// results to stdout and are read by a person or a script, so emitting log
+/// lines into the same stream would corrupt output that something is parsing.
+/// A server, by contrast, has nowhere else to say anything — and one that logs
+/// nothing is indistinguishable from one that is not running.
+fn init_logging() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_env("TRANSCODARR_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(filter).with_target(false).init();
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse_from(rewrite_legacy_verbs(std::env::args().collect()));
+    if matches!(cli.command, Commands::Serve(_) | Commands::Agent(_)) {
+        init_logging();
+    }
     match cli.command {
         Commands::Local(cmd) => local::run(cmd),
         Commands::Admin(cmd) => admin::run(cmd),
+        Commands::Serve(args) => serve::run(args),
+        Commands::Agent(cmd) => agent::run(cmd),
     }
 }
 
