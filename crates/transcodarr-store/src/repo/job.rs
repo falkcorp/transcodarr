@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/repo/job.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: e0947b25-6c31-4fa8-b0d2-58e1a37c92f6
-// last-edited: 2026-08-03
+// last-edited: 2026-08-06
 //! Jobs: creation, reads, and the compare-and-swap transition.
 
 use rusqlite::{OptionalExtension, Row, params};
@@ -289,6 +289,56 @@ impl JobRepo {
                 "INSERT INTO job_event (job_id, at_unix_ms, from_state, to_state, reason_code)
                  VALUES (?1, ?2, NULL, 'Pending', 'created')",
                 params![job.id, now * 1000],
+            )?;
+            Ok(rows as u64)
+        })
+    }
+
+    /// Place a job on an agent: the assignment and the transition, together.
+    ///
+    /// One op on purpose. A job that reached `Assigned` with no `agent_id`
+    /// would be held by nobody and reclaimed by nothing — the reconciler sees
+    /// no agent to miss, and the heartbeat check that revokes unrecognised work
+    /// compares against a `NULL` that matches no agent. The writer's per-op
+    /// `SAVEPOINT` means both land or neither does.
+    ///
+    /// The epoch is stamped here rather than read later because it is the whole
+    /// fence: a commit arriving under a different one must be refused, and that
+    /// comparison needs the epoch the job was *given out* under, not whatever
+    /// the agent holds by the time it reports.
+    pub fn assign_op(job_id: String, agent_id: String, fencing_epoch: i64) -> WriteOp {
+        WriteOp::new(format!("job.assign:{job_id}"), move |c| {
+            let now = now_unix();
+            let rows = c.execute(
+                "UPDATE job SET
+                   state = 'Assigned',
+                   agent_id = ?2,
+                   fencing_epoch = ?3,
+                   updated_unix = ?4
+                 WHERE id = ?1 AND state = 'Eligible'",
+                params![job_id, agent_id, fencing_epoch, now],
+            )?;
+
+            // Zero rows means it was not `Eligible` when the update ran —
+            // another pass placed it, or the reconciler took it back. The
+            // caller's decision was made against state that no longer holds.
+            if rows == 0 {
+                return Err(StoreError::TransitionRaceLost {
+                    job_id: job_id.clone(),
+                    expected: "Eligible".to_string(),
+                });
+            }
+
+            c.execute(
+                "INSERT INTO job_event
+                   (job_id, at_unix_ms, from_state, to_state, attempt, reason_code, detail)
+                 VALUES (?1, ?2, 'Eligible', 'Assigned',
+                         (SELECT attempt FROM job WHERE id = ?1), 'dispatched', ?3)",
+                params![
+                    job_id,
+                    now * 1000,
+                    format!("to {agent_id} at epoch {fencing_epoch}")
+                ],
             )?;
             Ok(rows as u64)
         })

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/tests/register.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8f27b0d5-63a1-4e94-b8c2-15de70a3968f
-// last-edited: 2026-08-04
+// last-edited: 2026-08-06
 //! Registration over a real gRPC channel.
 //!
 //! Every test here starts a `tonic` server on a loopback port, dials it with
@@ -25,7 +25,7 @@ use tonic::transport::{Channel, Server};
 
 use transcodarr_proto::pb;
 use transcodarr_server::AgentSession;
-use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, JobRepo};
+use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo};
 use transcodarr_store::{Db, ReadPool, Writer};
 
 /// A live server on a loopback port, with a client already dialled.
@@ -45,6 +45,7 @@ async fn harness(auth_token: Option<&str>) -> Harness {
         AgentRepo::new(pool.clone()),
         CommitIntentRepo::new(pool.clone()),
         JobRepo::new(pool.clone()),
+        LibraryRepo::new(pool.clone()),
         writer,
         auth_token.map(str::to_string),
     );

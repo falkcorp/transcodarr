@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.8.0
+// version: 1.9.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
 // last-edited: 2026-08-06
 #![deny(unsafe_code)]
@@ -21,6 +21,7 @@ pub mod explain;
 pub mod fleet;
 pub mod hardening;
 pub mod metrics;
+pub mod orchestrator;
 pub mod prober;
 pub mod reconcile;
 pub mod runner;
@@ -37,6 +38,7 @@ pub use evaluator::{EvalOutcome, Evaluator};
 pub use explain::{Explainer, Explanation};
 pub use fleet::{AgentTable, Connected};
 pub use hardening::{AgentHealth, RetryDecision, decide_retry};
+pub use orchestrator::{DEFAULT_TICK, Orchestrator, TickOutcome};
 pub use prober::{ProbeOptions, ProbeOutcome, Prober};
 pub use reconcile::{Action, InFlight, Reconciler};
 pub use runner::{JobOutcome, LocalRunner, RunOutcome};
