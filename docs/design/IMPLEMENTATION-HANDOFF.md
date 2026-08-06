@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.8.0 -->
+<!-- version: 3.9.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-05 -->
 
@@ -84,7 +84,7 @@ Two lessons worth keeping:
 | **1 — Workspace split and `transcodarr-core`** | **Complete.** All milestone criteria met with zero media, network or DB. |
 | 2 — `transcodarr-store`, scanner, evaluator | **Code complete; milestone part-run.** Store, `Scanner`, `Prober`, `Evaluator`, `admin explain` and the operator commands all shipped. Discovery verified on all three real libraries (49,600 files in 43 s). Probe ingestion is long-running — see below. |
 | 3 — Single-node executor and commit ritual | **Mostly done.** Ritual, journal, crash matrix, executor, validation and `admin run` shipped and proven on real media. `TrashCan` retention and `CommitIntentRepo` remain, plus the 200-file milestone. **D14 decided — see below.** |
-| 4 — Protocol, one agent, dispatcher | **In progress.** Both sides of the transport are done: codegen, `AgentRepo`, `Register`, the `Connect` stream, and as of 2026-08-05 `ConnectClient` and `LocalWorker`. **No `JobAssignment` is ever sent** — there is no dispatch loop and no `serve` verb, so nothing runs end-to-end against the real server yet. |
+| 4 — Protocol, one agent, dispatcher | **Working end to end.** `serve`, `agent connect`, the dispatch loop, and a job proven all the way through on a real library: scan → evaluate → dispatch → encode → validate → commit → installed. **The milestone has not been run** — see below. |
 | 5 — GPU class, capability probing | Not started. |
 | 6 — Observability, schedules, UI | Not started. |
 | 7 — Hardening | Not started. |
@@ -329,15 +329,35 @@ Four things not to relitigate, each of which loses media if inverted:
   is installed and the source is untouched. Permission is never inferred from
   silence.
 
-**Remaining, in dependency order:**
+**`serve`, `agent connect` and the dispatch loop have landed** (PRs #65, #66,
+#67). `Orchestrator` runs `Dispatcher`, `CapacityLedger` and `Reconciler` on a
+tick alongside the gRPC server under one shutdown signal. Verified on a real
+library, not only in tests:
 
-1. **`serve` and `agent connect`** CLI verbs, and the loop tying
-   `ScheduleEngine` → `Dispatcher` → session outbound → `Reconciler`. The
-   dispatcher, capacity ledger, reconciler and schedule engine all exist and
-   nothing calls them.
-2. **The milestone**: the DI-1 maximal-matching table as a CI-checked artifact,
-   a `FakeAgent` load test, then 24 concurrent audio jobs sustained on U1. The
-   milestone does **not** require the GPU node — Phase 4 is audio-class only.
+```console
+$ transcodarr admin scan --db ./tc.db
+lib: 1 seen, 1 new ... evaluated 1, 1 jobs created
+$ transcodarr serve --db ./tc.db --listen 127.0.0.1:7996 --tick-seconds 2
+$ transcodarr agent connect --server http://127.0.0.1:7996 --id u1 --work-dir ... --mount ...
+ INFO commit resolved agent=u1 job=37940ef7... resolution=installed state=Succeeded
+
+before: h264 flac      after: h264 eac3      trash: lib/trash/ShowA/S01E01.mkv
+```
+
+Two rules in the loop worth not relitigating:
+
+- **The capacity ledger is rebuilt from the database every tick, not
+  maintained.** Incremental accounting is a second source of truth about who
+  holds what, and its failure mode is silent: a missed release leaks a slot and
+  the fleet runs below capacity with nothing in any log.
+- **The commit intent is written before the assignment is sent.** The unique
+  index over live intents is what makes two jobs against one destination
+  impossible. A job that then fails must release it, or that path is blocked
+  forever by a job nobody is running.
+
+**Remaining: the milestone.** The DI-1 maximal-matching table as a CI-checked
+artifact, a `FakeAgent` load test, then 24 concurrent audio jobs sustained on
+U1. It does **not** require the GPU node — Phase 4 is audio-class only.
 
 One caveat on that milestone. It asserts `transcodarr_dispatch_latency_seconds`
 p99 ≤ 100 ms, but `metrics.rs` is names-only with no exporter until Phase 6, so
@@ -350,6 +370,34 @@ dependency: it has to stay copyable to the Windows node without dragging SQLite
 along. Check with `cargo tree -p transcodarr-agent -i transcodarr-store` rather
 than by eye — a shared proto crate makes a transitive dependency easy to add by
 accident.
+
+### Four defects the dispatch work uncovered (PRs #66, #67)
+
+Every one of them was in code with passing tests, and **three were found by
+running the system rather than by testing it**:
+
+1. **Muxers were dropped at the conversion boundary.** `TryFrom<pb::Capability>`
+   set `muxers: Vec::new()`, so every agent registered advertising none — and
+   every job the evaluator creates requires `Muxer(Matroska)`. A fleet would
+   connect, report healthy, and dispatch nothing forever. 509 tests were green
+   at the time, because the one end-to-end test built its job with
+   `requirements_json: "[]"` and never exercised capability matching. **That was
+   the more important defect.** The test now carries what a real evaluator
+   attaches.
+2. **A commit grant handed back the destination as the trash path.** The ritual
+   would rename the original onto itself — a silent no-op — then install over
+   it. The original destroyed by the step that exists to preserve it. The unit
+   test asserted the wrong path and passed.
+3. **Originals with the same basename collided in the trash.** Two shows each
+   with an `S01E01.mkv` is the common case. `paths::trash_path_for` now keeps
+   the path below the library root; `admin run` shares it.
+4. **Every dispatched encode failed validation.** The spec carries the source's
+   container-header duration and the agent measures the output's last-packet
+   PTS. Measured: header 2.000s, output PTS 1.800s, tolerance 10ms. The agent
+   re-measures the source the way it measures the output, as `admin run` did.
+
+The lesson worth keeping: **a green suite is evidence about the tests, not about
+the system.** Run the thing.
 
 ### Two defects the client work uncovered (PR #62)
 
@@ -404,7 +452,7 @@ redirect). The local clone is still at `~/repos/github.com/jdfalk/transcoderr`
 — only the repo and crate were renamed.
 
 `main` is green, and as of 2026-08-04 that is verified by CI rather than only on
-one laptop: **484 tests passing**, `cargo fmt -- --check`,
+one laptop: **511 tests passing**, `cargo fmt -- --check`,
 `cargo clippy --all-targets --all-features -- -D warnings`, `cargo build
 --release`, `buf lint`, `buf breaking` against `main`, and markdownlint.
 
@@ -417,14 +465,17 @@ Six crates:
 | `transcodarr-proto` | Wire contract, version gate, codegen, conversion boundary. |
 | `transcodarr-server` | Scanner, prober, evaluator, dispatcher, reconciler, schedule engine, capacity ledger, hardening, and the agent session. |
 | `transcodarr-agent` | Work area, journal, commit ritual, executor, preflight, capability trial, identity, and the transport client. |
-| `transcodarr-cli` | `local` and `admin` verbs. **No `serve`, no `agent connect`.** |
+| `transcodarr-cli` | `local`, `admin`, `serve` and `agent` verbs. |
 
-The last row, plus the dispatch loop, is what is left in Phase 4.
+Phase 4's code is complete; its milestone has not been run.
 
 The last eight pull requests, most recent first:
 
 | PR | What |
 | --- | --- |
+| #67 | Muxers dropped at the boundary: nothing could dispatch at all |
+| #66 | The dispatch loop, and one job proven end to end |
+| #65 | `serve` and `agent connect`: both ends run |
 | #63 | `ConnectClient` and `LocalWorker`: the agent speaks the transport |
 | #62 | The journal could never be recovered, and `boot_id` was the machine's |
 | #60 | Handoff: the `Connect` stream and the lookup bug it exposed |
@@ -689,33 +740,28 @@ them is expensive.
 
 ## First action for the next session
 
-**`serve` and `agent connect`, then the dispatch loop.** Both ends of the
-transport exist and are covered. What does not exist is anything that starts
-them, or anything that decides a `JobAssignment` — so a real agent can register
-with a real server, be accounted for, and sit idle forever.
+**The Phase 4 milestone.** The code is done and one job is proven end to end;
+what has not been done is the scale and latency evidence the milestone asks for.
 
-Read § *Phase 4 — in progress* above first, for the three codegen facts, the
-`Connect` semantics and the four client rules that will otherwise each cost an
-hour to rediscover.
+1. **The DI-1 maximal-matching table as a CI-checked artifact.** The dispatcher
+   implements it; nothing renders it into a form a reviewer can diff.
+2. **A `FakeAgent` load test.** Many agents against one server, on a loopback
+   port, to find where the loop's assumptions break before the real fleet does.
+   The transport is already exercised this way — `tests/end_to_end.rs` is the
+   shape to grow.
+3. **24 concurrent audio jobs sustained on U1.** The real-hardware run, and the
+   only part that needs the server. Audio class only; the GPU node is Phase 5.
 
-In order:
+One caveat to state in that pull request rather than let a later reader assume
+otherwise: the milestone asserts `transcodarr_dispatch_latency_seconds` p99 ≤
+100 ms, but `metrics.rs` is names-only with no exporter until Phase 6, so the
+measurement has to be made in-process against the same clock. That is not the
+Prometheus histogram the milestone text describes.
 
-1. **`transcodarr serve`** — build the `Runtime`, an `AgentSession` over the
-   store, and serve it with tonic. The `AgentTable` it holds is what the
-   dispatch loop reads, so pass one in with `AgentSession::with_fleet`.
-2. **`transcodarr agent connect`** — build a `LocalWorker` over a `WorkArea`,
-   `work.open_journal()` and an `Executor`, hand it to a `ConnectClient`, and
-   run it. The capability document is the open question: `probe_caps` builds
-   decoder capabilities and `preflight` knows the mounts, but nothing yet
-   assembles a whole `pb::Capability` from a machine.
-3. **The dispatch loop** tying `ScheduleEngine` → `Dispatcher` →
-   `AgentTable::send` → `Reconciler`. Every one of those exists, is tested, and
-   has no caller.
-
-Then the end-to-end proof, which is provable on the Mac with no media and no
-server access: one audio job through register → connect → assign → result →
-`RequestCommit` → `ReportCommit` → reconcile, with a stale-epoch `ReportCommit`
-in the same test rejected and the job left untouched.
+Also worth doing before scale: **`ScheduleEngine` is still not wired in.** The
+loop dispatches without consulting it, so schedule windows and pause overrides
+have no effect. It is built and tested, and `Orchestrator::tick` never asks it
+anything.
 
 **Do not let `transcodarr-agent` acquire a `transcodarr-store` dependency.** It
 has to stay copyable to the Windows node without dragging SQLite along. Check
