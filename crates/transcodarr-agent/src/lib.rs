@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/lib.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: b2947c0e-5d81-4f36-a7b0-6e13df852a94
-// last-edited: 2026-08-05
+// last-edited: 2026-08-06
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! transcodarr worker agent.
@@ -17,8 +17,17 @@ pub mod identity;
 pub mod journal;
 pub mod preflight;
 pub mod probe_caps;
+pub mod run;
+pub mod survey;
 pub mod workarea;
 pub mod worker;
+
+/// The wire types, re-exported.
+///
+/// The public [`client::Worker`] trait already speaks in these, so a caller
+/// implementing it would otherwise have to depend on `transcodarr-proto`
+/// directly and keep its version in step by hand.
+pub use transcodarr_proto::pb;
 
 pub use client::{
     ClientConfig, ClientError, ConnectClient, Link, ReconnectPolicy, Shutdown, Worker,
@@ -28,6 +37,8 @@ pub use executor::{Execution, Executor, ExecutorConfig, Progress, ProgressTailer
 pub use identity::{agent_uid, boot_id};
 pub use journal::{IntentJournal, IntentPhase, IntentRecord};
 pub use probe_caps::{TrialOutcome, capability_for, classify};
+pub use run::{RunConfig, prepare, run};
+pub use survey::{MountSpec, SurveyConfig, survey};
 pub use workarea::WorkArea;
 pub use worker::LocalWorker;
 
