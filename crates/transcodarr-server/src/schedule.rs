@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/schedule.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 0c67f4b8-2a91-45de-83b0-6e17c9d2045a
-// last-edited: 2026-08-03
+// last-edited: 2026-08-06
 //! When work is allowed to run, and how much of it.
 //!
 //! Three rules, each preventing something specific:
@@ -131,6 +131,25 @@ impl ScheduleEngine {
         Self::default()
     }
 
+    /// An engine that pauses the whole fleet until `expires_unix`.
+    ///
+    /// Expiry is mandatory here as everywhere else: a pause with no end is how
+    /// a fleet stays off for a week because the person who stopped it went on
+    /// holiday. A caller that genuinely wants an indefinite pause sets a far
+    /// expiry and has to look at the number while doing it.
+    pub fn paused_until(expires_unix: i64, reason: impl Into<String>) -> Self {
+        Self {
+            windows: Vec::new(),
+            overrides: vec![Override {
+                scope: "*".to_string(),
+                class: None,
+                slots: 0,
+                expires_unix,
+                reason: reason.into(),
+            }],
+        }
+    }
+
     /// Replace the window set.
     pub fn set_windows(&mut self, windows: Vec<ScheduleWindow>) {
         self.windows = windows;
@@ -206,6 +225,23 @@ impl ScheduleEngine {
         }
 
         limits
+    }
+
+    /// The weekday and minute-of-day a unix timestamp falls on, in **UTC**.
+    ///
+    /// UTC and not local time, deliberately. A schedule that shifts twice a
+    /// year is one that runs an hour of heavy encoding into the morning every
+    /// spring, and the operator who wrote "22:00-06:00" has no way to tell
+    /// which definition was meant. Documented here because it is the sort of
+    /// thing a reader assumes rather than checks.
+    ///
+    /// 1970-01-01 was a Thursday, which is where the `+4` comes from; the
+    /// result is 0 = Monday.
+    pub fn clock(now_unix: i64) -> (u8, i64) {
+        let days = now_unix.div_euclid(86_400);
+        let weekday = u8::try_from((days + 3).rem_euclid(7)).unwrap_or(0);
+        let minute_of_day = now_unix.rem_euclid(86_400) / 60;
+        (weekday, minute_of_day)
     }
 
     /// Whether a running job should be allowed to finish.

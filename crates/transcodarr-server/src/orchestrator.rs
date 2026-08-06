@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/orchestrator.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 74b2e9c0-3a58-4f16-9d47-0e85b3c21fa6
 // last-edited: 2026-08-06
 //! The loop: queue in, assignments out, and the ledger kept honest.
@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use transcodarr_core::capability::{Capability, Requirements};
+use transcodarr_core::failure::FailureClass;
 use transcodarr_core::job::JobState;
 use transcodarr_core::plan::JobPaths;
 use transcodarr_core::policy::{self, Policy};
@@ -54,7 +55,9 @@ use crate::ServerError;
 use crate::capacity::{AgentLimits, CapacityLedger, Grant};
 use crate::dispatch::{AgentEntry, Dispatcher, QueuedJob};
 use crate::fleet::AgentTable;
+use crate::hardening::{RetryDecision, decide_retry};
 use crate::reconcile::{Action, InFlight, Reconciler};
+use crate::schedule::ScheduleEngine;
 
 /// States in which a job is legitimately held by an agent.
 const HELD_STATES: [JobState; 4] = [
@@ -63,6 +66,14 @@ const HELD_STATES: [JobState; 4] = [
     JobState::Verifying,
     JobState::Committing,
 ];
+
+/// The states a job may be dispatched from.
+///
+/// `Eligible` is not optional. Every requeue lands there — the state machine
+/// has no edge back to `Pending` — so a loop that read only `Pending` would
+/// leave every job an agent dropped sitting there permanently, invisible to
+/// each later pass, with the queue looking empty and the file never processed.
+const DISPATCHABLE_STATES: [JobState; 2] = [JobState::Pending, JobState::Eligible];
 
 /// How many pending jobs one pass considers.
 ///
@@ -99,6 +110,7 @@ pub struct Orchestrator {
     dispatcher: Mutex<Dispatcher>,
     ledger: Mutex<CapacityLedger>,
     reconciler: Reconciler,
+    schedule: ScheduleEngine,
     policy: Policy,
     limits: AgentLimits,
 }
@@ -127,9 +139,20 @@ impl Orchestrator {
             dispatcher: Mutex::new(Dispatcher::new()),
             ledger: Mutex::new(CapacityLedger::new()),
             reconciler: Reconciler::new(),
+            schedule: ScheduleEngine::new(),
             policy,
             limits,
         }
+    }
+
+    /// Dispatch under a schedule.
+    ///
+    /// Without one, windows and operator pauses have no effect: the engine was
+    /// built and tested and nothing asked it anything, so an operator pausing
+    /// the fleet changed nothing at all.
+    pub fn with_schedule(mut self, schedule: ScheduleEngine) -> Self {
+        self.schedule = schedule;
+        self
     }
 
     /// Run until the future resolves.
@@ -181,7 +204,19 @@ impl Orchestrator {
         }
         self.rebuild_capacity(&agents)?;
 
-        let pending = self.jobs.in_state(JobState::Pending, QUEUE_WINDOW)?;
+        // Asked before anything is placed. A window closing means "start
+        // nothing new", never "stop what is running" -- cancelling mid-encode
+        // throws the work away and can interrupt a commit, which is the one
+        // moment where stopping is genuinely dangerous.
+        if self.is_paused(&agents) {
+            tracing::debug!("dispatch is paused by the schedule");
+            return Ok(outcome);
+        }
+
+        let mut pending = Vec::new();
+        for state in DISPATCHABLE_STATES {
+            pending.extend(self.jobs.in_state(state, QUEUE_WINDOW)?);
+        }
         if pending.is_empty() {
             return Ok(outcome);
         }
@@ -322,6 +357,13 @@ impl Orchestrator {
             size_bucket: job.size_bucket,
             requirements,
             bucket_key: job.requirements_bucket_key.clone(),
+            // Empty, and that is the domain rule rather than a gap: losing an
+            // agent is a `Transient` failure, which retries anywhere
+            // *including the same agent*. Exclusion belongs to
+            // `CapabilityDrift` -- an agent that cannot do what it advertised
+            // -- and nothing reports that yet. Excluding on a transient
+            // failure would strand a job as soon as it had been unlucky on
+            // every agent in a small fleet.
             excluded_agents: Vec::new(),
         })
     }
@@ -387,16 +429,22 @@ impl Orchestrator {
             }),
         )?;
 
-        self.writer.submit_blocking(
-            WriteLane::Normal,
-            JobRepo::transition_op(
-                job.id.clone(),
-                JobState::Pending,
-                JobState::Eligible,
-                None,
-                None,
-            ),
-        )?;
+        // Only from `Pending`. A requeued job is already `Eligible`, and
+        // asking for a transition it cannot make fails the placement and hands
+        // the job straight back to the queue it just came from — a retry that
+        // can never happen, quietly, forever.
+        if job.state == JobState::Pending {
+            self.writer.submit_blocking(
+                WriteLane::Normal,
+                JobRepo::transition_op(
+                    job.id.clone(),
+                    JobState::Pending,
+                    JobState::Eligible,
+                    None,
+                    None,
+                ),
+            )?;
+        }
         self.writer.submit_blocking(
             WriteLane::Normal,
             JobRepo::assign_op(job.id.clone(), agent_id.to_string(), epoch),
@@ -439,32 +487,12 @@ impl Orchestrator {
     /// live blocks its own destination forever: the next dispatch writes a
     /// second live intent for that path, the unique index refuses it, and the
     /// file is unprocessable until somebody reads the database by hand.
-    fn abandon(&self, job_id: &str, attempt: i64, reason: &str) -> Result<(), ServerError> {
-        self.writer.submit_blocking(
-            WriteLane::Commit,
-            CommitIntentRepo::resolve_op(format!("{job_id}:{attempt}"), "abandoned".to_string()),
-        )?;
-        self.writer.submit_blocking(
-            WriteLane::Normal,
-            JobRepo::transition_op(
-                job_id.to_string(),
-                JobState::Assigned,
-                JobState::Retrying,
-                Some("dispatch_failed".into()),
-                Some(reason.to_string()),
-            ),
-        )?;
-        self.writer.submit_blocking(
-            WriteLane::Normal,
-            JobRepo::transition_op(
-                job_id.to_string(),
-                JobState::Retrying,
-                JobState::Eligible,
-                None,
-                None,
-            ),
-        )?;
-        Ok(())
+    fn abandon(&self, job_id: &str, _attempt: i64, reason: &str) -> Result<(), ServerError> {
+        // The same path a lost agent takes, budget included -- an assignment
+        // that cannot be sent is a transient failure like any other, and giving
+        // it an unbudgeted retry would let one unreachable agent cycle a job
+        // forever.
+        self.requeue(job_id, JobState::Assigned, reason)
     }
 
     /// Decide what to do about work whose agent has gone quiet.
@@ -479,11 +507,20 @@ impl Orchestrator {
         let mut in_flight = Vec::new();
         for state in HELD_STATES {
             for job in self.jobs.in_state(state, QUEUE_WINDOW)? {
-                let has_live_intent = self
-                    .intents
-                    .live_for_job(&job.id)
-                    .map(|i| i.is_some())
-                    .unwrap_or(false);
+                // An intent exists from the moment a job is *dispatched*, so
+                // its mere presence says nothing about whether the destination
+                // has been touched. What the reconciler must never guess about
+                // is a job whose agent was granted permission and may be
+                // between the two renames right now -- and the grant is only
+                // ever issued once the job is `Committing`. Passing the raw
+                // "a row exists" would escalate every job whose agent merely
+                // went offline, and nothing would ever be retried.
+                let has_live_intent = job.state == JobState::Committing
+                    && self
+                        .intents
+                        .live_for_job(&job.id)
+                        .map(|i| i.is_some())
+                        .unwrap_or(false);
                 in_flight.push((
                     job.state,
                     InFlight {
@@ -539,12 +576,26 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Return one job to the queue, releasing what it held.
+    /// Return one job to the queue, or stop retrying it.
+    ///
+    /// The budget is what stops one unlucky file occupying a slot every tick
+    /// for the life of the server while the queue behind it never moves.
+    /// `decide_retry` owns that decision — it existed, was tested, and had no
+    /// caller until now.
+    ///
+    /// The attempt is incremented **only when the job will actually be tried
+    /// again**. It is also what makes the retry's commit intent distinct:
+    /// `commit_intent.id` is `job:attempt`, so reusing the number would collide
+    /// with the previous attempt's row on the primary key and the job could
+    /// never be placed a second time.
     fn requeue(&self, job_id: &str, from: JobState, reason: &str) -> Result<(), ServerError> {
-        let attempt = self.jobs.get(job_id).map(|j| j.attempt).unwrap_or(0);
+        let job = self.jobs.get(job_id)?;
         self.writer.submit_blocking(
             WriteLane::Commit,
-            CommitIntentRepo::resolve_op(format!("{job_id}:{attempt}"), "abandoned".to_string()),
+            CommitIntentRepo::resolve_op(
+                format!("{job_id}:{}", job.attempt),
+                "abandoned".to_string(),
+            ),
         )?;
         self.writer.submit_blocking(
             WriteLane::Normal,
@@ -556,21 +607,66 @@ impl Orchestrator {
                 Some(reason.to_string()),
             ),
         )?;
+
+        // Losing an agent says nothing about the job, so the failure is
+        // transient: it should be tried again, anywhere, including here.
+        let decision = decide_retry(FailureClass::Transient, job.attempt, job.max_attempts);
+        let (to, code, detail) = match decision {
+            RetryDecision::RetryAfter { .. } => {
+                self.writer.submit_blocking(
+                    WriteLane::Normal,
+                    JobRepo::bump_attempt_op(job_id.to_string()),
+                )?;
+                (JobState::Eligible, None, None)
+            }
+            RetryDecision::DeadLetter { reason } => (
+                JobState::DeadLettered,
+                Some("attempts_exhausted".to_string()),
+                Some(reason),
+            ),
+            RetryDecision::Permanent { reason } => (
+                JobState::Failed,
+                Some("permanent".to_string()),
+                Some(reason),
+            ),
+        };
+
+        if to != JobState::Eligible {
+            tracing::warn!(job = %job_id, state = ?to, ?detail, "no longer retrying");
+        }
+
         self.writer.submit_blocking(
             WriteLane::Normal,
-            JobRepo::transition_op(
-                job_id.to_string(),
-                JobState::Retrying,
-                JobState::Eligible,
-                None,
-                None,
-            ),
+            JobRepo::transition_op(job_id.to_string(), JobState::Retrying, to, code, detail),
         )?;
         self.ledger
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .release(job_id);
         Ok(())
+    }
+
+    /// Whether the schedule says to place nothing right now.
+    ///
+    /// Paused when *no* agent has a slot. A window that zeroes one agent still
+    /// leaves the fleet working, and treating that as a fleet-wide pause would
+    /// stop everyone because one node was quietened.
+    fn is_paused(&self, agents: &[AgentEntry]) -> bool {
+        let now = now_unix();
+        let (weekday, minute) = ScheduleEngine::clock(now);
+        let per_class = std::collections::HashMap::new();
+        agents.iter().all(|a| {
+            self.schedule
+                .effective(
+                    &a.id,
+                    self.limits.total_slots,
+                    &per_class,
+                    weekday,
+                    minute,
+                    now,
+                )
+                .is_paused()
+        })
     }
 
     /// When an agent's lease runs out, if it has one.

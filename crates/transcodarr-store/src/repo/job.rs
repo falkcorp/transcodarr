@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/job.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: e0947b25-6c31-4fa8-b0d2-58e1a37c92f6
 // last-edited: 2026-08-06
 //! Jobs: creation, reads, and the compare-and-swap transition.
@@ -291,6 +291,27 @@ impl JobRepo {
                 params![job.id, now * 1000],
             )?;
             Ok(rows as u64)
+        })
+    }
+
+    /// Count another attempt.
+    ///
+    /// Separate from the transition because the two answer different questions,
+    /// and conflating them gets one of them wrong: a job moves through
+    /// `Retrying` on its way out of every failure, but only a failure that will
+    /// actually be *retried* consumes an attempt. Bumping inside the transition
+    /// would charge an attempt to a job on its way to being dead-lettered.
+    ///
+    /// The attempt number is also what makes a retry's commit intent distinct.
+    /// `commit_intent.id` is `job:attempt`, so a re-dispatch that reused the
+    /// number would collide with the previous attempt's row on the primary key
+    /// and could never be placed at all.
+    pub fn bump_attempt_op(job_id: String) -> WriteOp {
+        WriteOp::new(format!("job.bump_attempt:{job_id}"), move |c| {
+            Ok(c.execute(
+                "UPDATE job SET attempt = attempt + 1, updated_unix = ?2 WHERE id = ?1",
+                params![job_id, now_unix()],
+            )? as u64)
         })
     }
 

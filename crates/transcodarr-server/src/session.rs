@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-06
 //! Registration and the agent stream: the server side of the transport.
@@ -62,6 +62,9 @@ use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
 use transcodarr_store::repo::{
     AgentRegistration, AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo,
 };
+
+use crate::hardening::{RetryDecision, decide_retry};
+use transcodarr_core::failure::FailureClass;
 use transcodarr_store::writer::{WriteLane, Writer};
 
 use crate::fleet::AgentTable;
@@ -725,12 +728,49 @@ impl AgentSession {
             stderr = %tail(&r.stderr_tail), "encode rejected"
         );
         self.release_intent(&r.job_id, job.attempt).await;
+
+        // Through `Retrying`, not straight to `Failed`. A rejected output is
+        // usually the file or the plan and sometimes the machine — a full disk,
+        // an OOM kill, an ffmpeg that died on a bad sector read. Sending the
+        // first rejection to a terminal state throws the job away over what may
+        // have been one bad afternoon on one node, and `Failed` cannot be
+        // transitioned out of. The dispatch loop owns the budget from there:
+        // it picks the job up in `Eligible` and stops when `max_attempts` is
+        // spent.
         self.write(JobRepo::transition_op(
             r.job_id.clone(),
             JobState::Running,
-            JobState::Failed,
+            JobState::Retrying,
             Some("validation_failed".into()),
             Some(tail(&r.stderr_tail)),
+        ))
+        .await?;
+
+        let decision = decide_retry(FailureClass::Transient, job.attempt, job.max_attempts);
+        let (to, code) = match decision {
+            RetryDecision::RetryAfter { .. } => {
+                self.write(JobRepo::bump_attempt_op(r.job_id.clone()))
+                    .await?;
+                (JobState::Eligible, None)
+            }
+            RetryDecision::DeadLetter { reason } => {
+                tracing::error!(job = %r.job_id, %reason, "no attempts left");
+                (
+                    JobState::DeadLettered,
+                    Some("attempts_exhausted".to_string()),
+                )
+            }
+            RetryDecision::Permanent { reason } => {
+                tracing::error!(job = %r.job_id, %reason, "not retryable");
+                (JobState::Failed, Some("permanent".to_string()))
+            }
+        };
+        self.write(JobRepo::transition_op(
+            r.job_id.clone(),
+            JobState::Retrying,
+            to,
+            code,
+            None,
         ))
         .await?;
         Ok(())
@@ -769,13 +809,20 @@ impl AgentSession {
         let (granted, reason, trash_path) = self.judge_commit(agent_id, epoch, &req)?;
         if !granted {
             tracing::warn!(agent = %agent_id, job = %req.job_id, %reason, "commit refused");
-        } else {
-            // Moved before the grant is sent, not after the report comes back.
-            // `Committing` is the state the reconciler refuses to guess about,
-            // and the window it must cover starts the moment the agent is told
-            // it may touch the destination -- not when it tells us it did.
-            // There is no Verifying -> Succeeded edge for exactly this reason.
-            if let Err(e) = self
+        }
+
+        // Moved before the grant is sent, not after the report comes back.
+        // `Committing` is the state the reconciler refuses to guess about, and
+        // the window it must cover starts the moment the agent is told it may
+        // touch the destination -- not when it tells us it did. There is no
+        // Verifying -> Succeeded edge for exactly this reason.
+        //
+        // **A failure here withdraws the grant.** Permission that could not be
+        // written down is permission the server cannot account for: the agent
+        // would replace a file the reconciler still believes nobody is
+        // touching, and would then be reclaimed mid-ritual by a requeue.
+        let (granted, reason, trash_path) = if granted {
+            match self
                 .write(JobRepo::transition_op(
                     req.job_id.clone(),
                     JobState::Verifying,
@@ -785,10 +832,20 @@ impl AgentSession {
                 ))
                 .await
             {
-                tracing::error!(job = %req.job_id, error = %e,
-                    "could not mark the job as committing");
+                Ok(()) => (true, reason, trash_path),
+                Err(e) => {
+                    tracing::error!(job = %req.job_id, error = %e,
+                        "could not record the commit; refusing rather than granting blind");
+                    (
+                        false,
+                        "the server could not record this commit".to_string(),
+                        String::new(),
+                    )
+                }
             }
-        }
+        } else {
+            (granted, reason, trash_path)
+        };
         self.fleet.send(
             agent_id,
             pb::ServerMessage {
