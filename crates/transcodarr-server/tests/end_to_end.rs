@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/end_to_end.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8a3c15f7-64b0-4e92-b1d8-07f5a29e3c64
 // last-edited: 2026-08-06
 //! One job, all the way through, over a real gRPC channel.
@@ -31,9 +31,10 @@ use transcodarr_agent::commit::CommitRitual;
 use transcodarr_agent::executor::{Executor, ExecutorConfig};
 use transcodarr_agent::workarea::WorkArea;
 use transcodarr_agent::worker::LocalWorker;
+use transcodarr_core::capability::{AgentClass, ContainerId, Requirement, Requirements};
 use transcodarr_core::facts::{FileFacts, SizeBucket};
 use transcodarr_core::job::{JobClass, JobState};
-use transcodarr_core::plan::BitDepth;
+use transcodarr_core::plan::{BitDepth, EncoderId};
 use transcodarr_proto::pb;
 use transcodarr_server::Runtime;
 use transcodarr_server::capacity::AgentLimits;
@@ -156,8 +157,9 @@ async fn a_job_goes_from_the_queue_to_installed() {
         pb::Capability {
             platform: "linux".into(),
             effective_cores: 4.0,
-            classes: vec!["audio".into()],
+            classes: vec!["audio".into(), "cpu".into()],
             encoders: vec!["eac3".into(), "aac".into()],
+            muxers: vec!["matroska".into()],
             mounts: vec![pb::Mount {
                 canonical_prefix: dir.path().join("lib").display().to_string(),
                 local_path: dir.path().join("lib").display().to_string(),
@@ -424,7 +426,17 @@ fn seed(runtime: &Runtime, media: &Path, work_dir: &str, trash_dir: &str, size: 
                 class: JobClass::Audio,
                 size_bucket: SizeBucket::Small,
                 priority: 0,
-                requirements_json: "[]".into(),
+                // The requirements a real evaluator attaches, not an empty
+                // list. An end-to-end test with no requirements never
+                // exercises capability matching -- which is how a boundary
+                // that silently dropped every agent's muxers passed every
+                // test in the suite and dispatched nothing in production.
+                requirements_json: serde_json::to_string(&Requirements(vec![
+                    Requirement::AgentClass(AgentClass::Cpu),
+                    Requirement::Encoder(EncoderId::Eac3),
+                    Requirement::Muxer(ContainerId::Matroska),
+                ]))
+                .unwrap(),
                 requirements_bucket_key: "audio".into(),
                 expected_content_sig: "sig-1".into(),
                 rules_version: "v1".into(),

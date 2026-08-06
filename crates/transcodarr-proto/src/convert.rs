@@ -1,7 +1,7 @@
 // file: crates/transcodarr-proto/src/convert.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 6d92f108-4b73-4a15-8c2e-01fb7d3a6592
-// last-edited: 2026-08-04
+// last-edited: 2026-08-06
 //! The boundary between generated types and domain types.
 //!
 //! Everything here exists to stop one class of bug: a value this build does not
@@ -27,8 +27,8 @@
 //! sent as something it is not.
 
 use transcodarr_core::capability::{
-    AgentClass, Capability, DecoderCapability, DecoderKind, DecoderStatus, DecoderTriple, Mount,
-    Platform,
+    AgentClass, Capability, ContainerId, DecoderCapability, DecoderKind, DecoderStatus,
+    DecoderTriple, Mount, Platform,
 };
 use transcodarr_core::plan::{BitDepth, EncoderId};
 
@@ -261,6 +261,34 @@ fn encoder_from_str(s: &str) -> Result<EncoderId, ProtoError> {
     })
 }
 
+/// Container muxers, by the name ffmpeg lists them under.
+///
+/// Skipped when unknown, for the same reason encoders are: an ffmpeg build
+/// lists hundreds of muxers this scheduler has no opinion about, and refusing a
+/// whole capability document over one of them would keep a working node out of
+/// the fleet.
+fn container_from_str(s: &str) -> Result<ContainerId, ProtoError> {
+    Ok(match s {
+        "matroska" => ContainerId::Matroska,
+        "mp4" => ContainerId::Mp4,
+        other => return Err(unrecognised("muxers", other)),
+    })
+}
+
+/// The wire spelling of a container.
+fn container_to_str(v: ContainerId) -> Result<&'static str, ProtoError> {
+    Ok(match v {
+        ContainerId::Matroska => "matroska",
+        ContainerId::Mp4 => "mp4",
+        other => {
+            return Err(ProtoError::Unrecognised {
+                field: "muxers",
+                value: format!("{other:?}"),
+            });
+        }
+    })
+}
+
 fn platform_from_str(s: &str) -> Result<Platform, ProtoError> {
     Ok(match s {
         "linux" => Platform::Linux,
@@ -317,7 +345,15 @@ impl TryFrom<pb::Capability> for Capability {
                 .iter()
                 .filter_map(|e| encoder_from_str(e).ok())
                 .collect(),
-            muxers: Vec::new(),
+            // Carried, not dropped. Every job the evaluator creates requires a
+            // `Muxer`, so an agent whose muxers are discarded at the boundary
+            // satisfies no job at all -- the fleet connects, reports healthy,
+            // and dispatches nothing. Found by running it, not by testing it.
+            muxers: v
+                .muxers
+                .iter()
+                .filter_map(|m| container_from_str(m).ok())
+                .collect(),
             decoders,
             effective_cores: v.effective_cores,
             mounts: v.mounts.into_iter().map(Mount::from).collect(),
@@ -356,6 +392,11 @@ impl TryFrom<Capability> for pb::Capability {
                 .decoders
                 .into_iter()
                 .map(pb::DecoderCapability::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            muxers: v
+                .muxers
+                .iter()
+                .map(|m| container_to_str(*m).map(str::to_string))
                 .collect::<Result<Vec<_>, _>>()?,
             mounts: v.mounts.into_iter().map(pb::Mount::from).collect(),
             workarea_free_bytes: v.workarea_free_bytes,
@@ -593,5 +634,39 @@ mod tests {
             ..Default::default()
         };
         assert!(LiveIntent::try_from(wire).is_err());
+    }
+
+    /// Muxers were dropped at this boundary, and every job the evaluator
+    /// creates carries a `Muxer` requirement — so every agent satisfied nothing
+    /// and the fleet dispatched no work at all while reporting healthy.
+    #[test]
+    fn muxers_survive_the_round_trip() {
+        let core = Capability {
+            classes: vec![AgentClass::Audio],
+            muxers: vec![ContainerId::Matroska, ContainerId::Mp4],
+            ..Default::default()
+        };
+        let wire = pb::Capability::try_from(core.clone()).unwrap();
+        assert_eq!(wire.muxers, vec!["matroska", "mp4"]);
+
+        let back = Capability::try_from(wire).unwrap();
+        assert_eq!(
+            back.muxers, core.muxers,
+            "a muxer must not be lost in transit"
+        );
+    }
+
+    /// An ffmpeg build lists hundreds of muxers this scheduler has no opinion
+    /// about. One unfamiliar name must not cost a working node its place in the
+    /// fleet.
+    #[test]
+    fn an_unknown_muxer_is_skipped_rather_than_refusing_the_agent() {
+        let wire = pb::Capability {
+            classes: vec!["audio".into()],
+            muxers: vec!["matroska".into(), "webm".into(), "avi".into()],
+            ..Default::default()
+        };
+        let back = Capability::try_from(wire).unwrap();
+        assert_eq!(back.muxers, vec![ContainerId::Matroska]);
     }
 }
