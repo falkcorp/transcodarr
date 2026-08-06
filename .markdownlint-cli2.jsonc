@@ -1,7 +1,7 @@
 // file: .markdownlint-cli2.jsonc
-// version: 1.0.0
+// version: 1.1.0
 // guid: 0c6b28f1-9a34-4d75-8e02-b31f5a7c94e8
-// last-edited: 2026-08-04
+// last-edited: 2026-08-06
 //
 // Markdown lint has never actually run in this repository -- the CI workflow it
 // belonged to failed to parse from the day it was written -- so its first real
@@ -50,6 +50,27 @@
     "target/**",
     "node_modules/**",
     // Working notes, not shipped documentation.
-    "PLAN.md"
+    "PLAN.md",
+
+    // The Remember plugin's local session buffer. Gitignored, so CI never sees
+    // it -- but it sits in the work tree, and without this a local run of the
+    // documented lint command reports eight failures in files that are not in
+    // the repository while CI reports none. A check whose local and CI verdicts
+    // disagree teaches people to ignore the local one.
+    ".remember/**",
+
+    // Assembled by scriv, never hand-edited (CLAUDE.md forbids it). Its layout
+    // is scriv's, not this repository's: each release section is introduced by
+    // an `<a id='changelog-vX.Y.Z'></a>` anchor sitting flush against the `##`
+    // heading, which trips MD033 and MD022. Verified 2026-08-06 by running
+    // `scriv collect` against a copy of the 63 pending fragments -- the output
+    // failed both rules.
+    //
+    // This had never been observed because changelog-collect.yml only fires on
+    // `release: published`, there has been no release, and the workflow commits
+    // with `[skip ci]` -- so the first release would have landed a CHANGELOG.md
+    // that reddens the NEXT, unrelated docs PR. Disabling MD022 repo-wide to
+    // accommodate one generated file would be worse than excluding the file.
+    "CHANGELOG.md"
   ]
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # file: scripts/assemble_todo.py
-# version: 1.2.0
+# version: 1.2.1
 # guid: af7ef324-6c69-411e-b1a9-98c9ba2b31e3
-# last-edited: 2026-07-19
+# last-edited: 2026-08-06
 
 """Assemble TODO.md from per-task fragment files in todo.d/.
 
@@ -30,6 +30,12 @@ Usage:
     python3 scripts/assemble_todo.py --dry-run    # print the result, touch nothing
     python3 scripts/assemble_todo.py --keep       # collect but leave fragments
     python3 scripts/assemble_todo.py --check      # exit 1 if fragments are pending
+
+Progress and warnings go to **stderr**; stdout carries only the thing the mode
+promises — the assembled document under ``--dry-run``, the pending paths under
+``--check``. Without that split, ``--dry-run > TODO.md`` writes a file whose
+first lines are ``collect todo.d/...`` progress chatter, which is exactly what
+the flag exists to let you avoid.
 """
 
 from __future__ import annotations
@@ -61,6 +67,17 @@ LAST_EDITED_HEADER = re.compile(
 
 class AssemblyError(RuntimeError):
     """A condition that should fail the run loudly rather than silently pass."""
+
+
+def note(message: str) -> None:
+    """Report progress on stderr, keeping stdout reserved for real output.
+
+    ``--dry-run`` exists so the assembled document can be inspected or
+    redirected before anything is written. Progress lines on stdout defeat that:
+    the redirect captures them too, and the resulting file opens with a dozen
+    ``collect todo.d/...`` lines above its own header.
+    """
+    print(message, file=sys.stderr)
 
 
 def load_config() -> configparser.SectionProxy | None:
@@ -119,7 +136,7 @@ def bump_header(text: str, today: str) -> str:
 
     text, count = VERSION_HEADER.subn(_bump, text, count=1)
     if not count:
-        print("warning: no '<!-- version: X.Y.Z -->' header to bump.")
+        note("warning: no '<!-- version: X.Y.Z -->' header to bump.")
 
     text, count = LAST_EDITED_HEADER.subn(
         lambda m: f"{m.group(1)}{today}{m.group(3)}",
@@ -127,7 +144,7 @@ def bump_header(text: str, today: str) -> str:
         count=1,
     )
     if not count:
-        print("warning: no '<!-- last-edited: ... -->' header to refresh.")
+        note("warning: no '<!-- last-edited: ... -->' header to refresh.")
     return text
 
 
@@ -187,7 +204,7 @@ def main() -> int:
 
     config = load_config()
     if config is None:
-        print(f"{CONFIG_FILE} not present — TODO fragments not enabled here.")
+        note(f"{CONFIG_FILE} not present — TODO fragments not enabled here.")
         return 0
 
     fragment_dir = Path(config.get("fragment_directory", "todo.d"))
@@ -201,7 +218,7 @@ def main() -> int:
         return 1 if fragments else 0
 
     if not fragments:
-        print(f"No fragments in {fragment_dir}/ — nothing to collect.")
+        note(f"No fragments in {fragment_dir}/ — nothing to collect.")
         return 0
 
     if not output_file.is_file():
@@ -211,7 +228,7 @@ def main() -> int:
     contributed = [body for _, body in bodies if body]
 
     for path, body in bodies:
-        print(f"{'no-op ' if not body else 'collect'} {path}")
+        note(f"{'no-op ' if not body else 'collect'} {path}")
 
     if contributed:
         text = insert_at_marker(
@@ -227,14 +244,14 @@ def main() -> int:
             sys.stdout.write(text)
             return 0
         output_file.write_text(text, encoding="utf-8")
-        print(f"Wrote {len(contributed)} task block(s) into {output_file}.")
+        note(f"Wrote {len(contributed)} task block(s) into {output_file}.")
     elif args.dry_run:
-        print("All fragments are no-ops; output file unchanged.")
+        note("All fragments are no-ops; output file unchanged.")
         return 0
 
     if not args.keep:
         git_rm(fragments)
-        print(f"Removed {len(fragments)} consumed fragment(s).")
+        note(f"Removed {len(fragments)} consumed fragment(s).")
     return 0
 
 
