@@ -1,5 +1,5 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.9.0 -->
+<!-- version: 3.9.1 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
 <!-- last-edited: 2026-08-05 -->
 
@@ -329,9 +329,9 @@ Four things not to relitigate, each of which loses media if inverted:
   is installed and the source is untouched. Permission is never inferred from
   silence.
 
-**`serve`, `agent connect` and the dispatch loop have landed** (PRs #65, #66,
-#67). `Orchestrator` runs `Dispatcher`, `CapacityLedger` and `Reconciler` on a
-tick alongside the gRPC server under one shutdown signal. Verified on a real
+**`serve`, `agent connect` and the dispatch loop have landed**
+(PRs #65, #66 and #67). `Orchestrator` runs `Dispatcher`, `CapacityLedger` and
+`Reconciler` on a tick alongside the gRPC server under one shutdown signal. Verified on a real
 library, not only in tests:
 
 ```console
