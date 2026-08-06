@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/connect.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 1e5b34d8-7f92-4a06-b3c5-82e17ad9604b
 // last-edited: 2026-08-06
 //! The `Connect` stream, over a real gRPC channel.
@@ -20,7 +20,7 @@ use tonic::transport::{Channel, Server};
 use tonic::{Request, Streaming};
 
 use transcodarr_core::facts::SizeBucket;
-use transcodarr_core::job::JobClass;
+use transcodarr_core::job::{JobClass, JobState};
 use transcodarr_proto::pb;
 use transcodarr_server::AgentSession;
 use transcodarr_store::repo::{
@@ -189,6 +189,52 @@ impl Harness {
             .unwrap();
     }
 
+    /// Walk a seeded job to `Verifying`, where an agent asks to commit from.
+    ///
+    /// The real path, not a shortcut: the server only grants a commit for a job
+    /// it can move to `Committing`, because permission it cannot record is
+    /// permission it cannot account for.
+    fn advance_to_verifying(&self, job_id: &str, agent_id: &str, epoch: i64) {
+        for (from, to) in [
+            (JobState::Pending, JobState::Eligible),
+            (JobState::Running, JobState::Verifying),
+        ] {
+            if from == JobState::Pending {
+                self.writer
+                    .submit_blocking(
+                        WriteLane::Normal,
+                        JobRepo::transition_op(job_id.into(), from, to, None, None),
+                    )
+                    .unwrap();
+                self.writer
+                    .submit_blocking(
+                        WriteLane::Normal,
+                        JobRepo::assign_op(job_id.into(), agent_id.into(), epoch),
+                    )
+                    .unwrap();
+                self.writer
+                    .submit_blocking(
+                        WriteLane::Normal,
+                        JobRepo::transition_op(
+                            job_id.into(),
+                            JobState::Assigned,
+                            JobState::Running,
+                            None,
+                            None,
+                        ),
+                    )
+                    .unwrap();
+            } else {
+                self.writer
+                    .submit_blocking(
+                        WriteLane::Normal,
+                        JobRepo::transition_op(job_id.into(), from, to, None, None),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
     /// Grant a live commit intent for a seeded job.
     fn seed_intent(&self, job_id: &str, agent_id: &str, epoch: i64) {
         self.writer
@@ -320,6 +366,7 @@ async fn a_commit_request_against_a_live_intent_is_granted() {
     let mut h = harness().await;
     let epoch = h.register().await;
     h.seed_job("j1");
+    h.advance_to_verifying("j1", "u1", epoch);
     h.seed_intent("j1", "u1", epoch);
 
     let (tx, mut stream) = h.open(epoch).await.unwrap();
@@ -360,6 +407,7 @@ async fn a_commit_report_bearing_a_stale_epoch_leaves_the_intent_untouched() {
     let mut h = harness().await;
     let epoch = h.register().await;
     h.seed_job("j1");
+    h.advance_to_verifying("j1", "u1", epoch);
     h.seed_intent("j1", "u1", epoch);
 
     let (tx, _stream) = h.open(epoch).await.unwrap();
@@ -391,6 +439,7 @@ async fn a_commit_report_under_the_current_epoch_resolves_the_intent() {
     let mut h = harness().await;
     let epoch = h.register().await;
     h.seed_job("j1");
+    h.advance_to_verifying("j1", "u1", epoch);
     h.seed_intent("j1", "u1", epoch);
 
     let (tx, _stream) = h.open(epoch).await.unwrap();
