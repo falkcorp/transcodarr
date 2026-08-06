@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/survey.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 3d92b0a7-5c14-4b86-9e02-7fa3b1d6485c
 // last-edited: 2026-08-06
 //! What this machine can actually do, as a capability document.
@@ -106,7 +106,6 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
         labels: config.labels.clone(),
     };
 
-    let muxer_names = muxer_names(&document.muxers);
     let mut wire: pb::Capability =
         document
             .try_into()
@@ -119,7 +118,6 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
     wire.ffmpeg_version = tool_version(&config.ffmpeg);
     wire.ffprobe_version = tool_version(&config.ffprobe);
     wire.physical_cores = physical_cores();
-    wire.muxers = muxer_names;
     for mount in &mut wire.mounts {
         mount.free_bytes = free_bytes(Path::new(&mount.local_path));
         mount.rename_probe = rename_verdict(Path::new(&mount.local_path)) as i32;
@@ -165,18 +163,6 @@ fn available_muxers(ffmpeg: &str) -> Vec<ContainerId> {
         out.push(ContainerId::Mp4);
     }
     out
-}
-
-/// The wire spelling of the muxers, which the domain type does not carry.
-fn muxer_names(muxers: &[ContainerId]) -> Vec<String> {
-    muxers
-        .iter()
-        .map(|m| match m {
-            ContainerId::Matroska => "matroska".to_string(),
-            ContainerId::Mp4 => "mp4".to_string(),
-            other => format!("{other:?}").to_lowercase(),
-        })
-        .collect()
 }
 
 /// Whether an ffmpeg listing names this codec.
