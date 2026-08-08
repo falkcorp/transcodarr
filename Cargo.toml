@@ -1,8 +1,8 @@
 [workspace]
 # file: Cargo.toml
-# version: 1.2.0
+# version: 1.2.1
 # guid: 4f8b1d27-3a60-4c95-b1e8-7d02a6f39c14
-# last-edited: 2026-08-06
+# last-edited: 2026-08-07
 resolver = "2"
 members = ["crates/*"]
 
@@ -65,4 +65,4 @@ walkdir = "2"
 rustls = "0.23"
 humantime-serde = "1"
 tempfile = "3"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
