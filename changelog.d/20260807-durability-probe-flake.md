@@ -52,6 +52,31 @@ asymmetry that proves neither is passing vacuously.
 Workspace suite: 515 → **517 passing**, and five consecutive runs of the store
 tests were clean where two consecutive runs previously failed differently.
 
+#### The same defect in the agent's preflight probe, found by CI
+
+Fixing the store's copy made CI fail on the agent's. `fsync_probe_reports_percentiles`
+asserted `status != Fail`, which is a claim about the disk under whoever runs
+the suite rather than about this code — and a loaded GitHub runner measured a
+p99 of **199.87 ms**, so the probe correctly reported `Fail` and the assertion
+called that a bug. The probe was right. A preflight that cannot say `Fail` is
+decoration; reporting a slow disk is its entire job.
+
+That the two copies had the same weakness is not a coincidence.
+`db.rs` records that `FSYNC_ABORT_US` is "duplicated from
+`transcodarr-agent::preflight` by intent, not oversight" — the constant was
+duplicated deliberately, and the untestable-threshold problem came with it.
+
+Classification is now split from measurement as `classify_fsync_p99`, and the
+three bands are asserted at their boundaries (`FSYNC_WARN_US`, `+1`,
+`FSYNC_ABORT_US`, `+1`, and the 199,870 µs a runner actually produced) where an
+inverted comparison or a swapped constant shows up. Sabotage-checked by swapping
+the two thresholds, which turns the middle band's test red. The probe test that
+remains asserts only what the code decides: that it reports p50 and p99.
+
+Worth noting the failure was intermittent, not new — PR #72's `Test Rust` passed
+an hour earlier on the same code. Shared-runner storage is variable, which is
+exactly why a wall-clock threshold does not belong in an assertion.
+
 ### Changed
 
 #### Two traps recorded in the handoff

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/preflight.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 4a7d2e69-b038-4517-8c94-1f60e3b7a2d5
-// last-edited: 2026-08-02
+// last-edited: 2026-08-07
 //! Environment preflight — the four probes that must pass before any
 //! orchestrator code is trusted on a machine.
 //!
@@ -219,6 +219,23 @@ pub const FSYNC_WARN_US: u128 = 10_000;
 /// latency is what actually matters.
 pub const FSYNC_ABORT_US: u128 = 100_000;
 
+/// Classify a measured fsync p99 against the warn and abort thresholds.
+///
+/// Split out from [`fsync_probe`] so the thresholds can be tested without
+/// depending on the disk underneath the test runner. Measurement and judgement
+/// are different jobs: what storage a machine happens to have is a fact about
+/// that machine, while where the boundaries sit is a decision this code owns,
+/// and only the second one is worth asserting in a unit test.
+fn classify_fsync_p99(p99_us: u128) -> ProbeStatus {
+    if p99_us > FSYNC_ABORT_US {
+        ProbeStatus::Fail
+    } else if p99_us > FSYNC_WARN_US {
+        ProbeStatus::Warn
+    } else {
+        ProbeStatus::Pass
+    }
+}
+
 /// Measure fsync latency on the candidate database path.
 pub fn fsync_probe(dir: &Path, iterations: usize) -> ProbeResult {
     let name = "DbFsyncLatency".to_string();
@@ -260,13 +277,7 @@ pub fn fsync_probe(dir: &Path, iterations: usize) -> ProbeResult {
                 p50 as f64 / 1000.0,
                 p99 as f64 / 1000.0
             );
-            let status = if p99 > FSYNC_ABORT_US {
-                ProbeStatus::Fail
-            } else if p99 > FSYNC_WARN_US {
-                ProbeStatus::Warn
-            } else {
-                ProbeStatus::Pass
-            };
+            let status = classify_fsync_p99(p99);
             ProbeResult {
                 name,
                 status,
@@ -513,8 +524,37 @@ mod tests {
     fn fsync_probe_reports_percentiles() {
         let d = TempDir::new().unwrap();
         let r = fsync_probe(d.path(), 50);
+        assert!(r.detail.contains("p50"), "{}", r.detail);
         assert!(r.detail.contains("p99"), "{}", r.detail);
-        assert_ne!(r.status, ProbeStatus::Fail, "{}", r.detail);
+    }
+
+    // This test used to also assert `status != Fail`, which is a claim about the
+    // disk under whoever is running the suite, not about this code. A loaded CI
+    // runner measured a p99 of 199.87 ms and the probe correctly reported Fail —
+    // the probe was right and the assertion was wrong. Reporting a slow disk is
+    // the whole job; a preflight that cannot say Fail is decoration.
+    //
+    // What is genuinely this code's decision is where the boundaries sit, so
+    // that is what is asserted now — at the boundaries themselves, where an
+    // inverted comparison or a swapped constant actually shows up.
+
+    #[test]
+    fn a_fast_disk_passes_the_fsync_thresholds() {
+        assert_eq!(classify_fsync_p99(0), ProbeStatus::Pass);
+        assert_eq!(classify_fsync_p99(FSYNC_WARN_US), ProbeStatus::Pass);
+    }
+
+    #[test]
+    fn a_middling_disk_warns_rather_than_failing() {
+        assert_eq!(classify_fsync_p99(FSYNC_WARN_US + 1), ProbeStatus::Warn);
+        assert_eq!(classify_fsync_p99(FSYNC_ABORT_US), ProbeStatus::Warn);
+    }
+
+    #[test]
+    fn a_disk_past_the_abort_threshold_fails() {
+        assert_eq!(classify_fsync_p99(FSYNC_ABORT_US + 1), ProbeStatus::Fail);
+        // The 199.87 ms a CI runner actually measured.
+        assert_eq!(classify_fsync_p99(199_870), ProbeStatus::Fail);
     }
 
     #[test]
