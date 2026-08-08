@@ -1,5 +1,5 @@
 <!-- file: TODO.md -->
-<!-- version: 0.6.1 -->
+<!-- version: 0.6.2 -->
 <!-- guid: 12345678-90ab-cdef-1234-567890abcdef -->
 
 # TODO
@@ -49,7 +49,7 @@ into one of the curated sections below, is a normal direct edit.
       still says probe ingestion was running at handoff; it has finished. A stale
       entry point is worse than a missing one, because it is believed.
 
-- [ ] **TODO-DURABILITY** Fix the flaky `DurabilityTooSlow` gate — `main` does
+- [x] **TODO-DURABILITY** Fix the flaky `DurabilityTooSlow` gate — `main` does
       not pass `cargo test` on the Mac, and it fails nondeterministically. Two
       tests failed on one run (`foreign_keys_are_enforced_not_merely_declared`,
       p99 109,934 us; `only_one_live_commit_intent_per_final_path`, p99 111,621
@@ -65,7 +65,7 @@ into one of the curated sections below, is a normal direct edit.
       the ZFS pool is latency-bound. Prefer making the limit an open-time
       parameter with a production default, so the check stays present everywhere
       rather than absent where most code runs.
-- [ ] **TODO-PIPEFAIL** Stop piped verification commands reporting success for a
+- [x] **TODO-PIPEFAIL** Stop piped verification commands reporting success for a
       failed run. `cargo test --workspace 2>&1 | tail -30` returned **exit 0**
       while two tests failed, because a pipeline's status is the last command's
       and `tail` always succeeds. This nearly buried TODO-DURABILITY. It is the

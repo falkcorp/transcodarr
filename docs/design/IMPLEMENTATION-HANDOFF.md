@@ -1,7 +1,7 @@
 <!-- file: docs/design/IMPLEMENTATION-HANDOFF.md -->
-<!-- version: 3.9.1 -->
+<!-- version: 3.10.0 -->
 <!-- guid: 9d4a7c31-6b28-4e5f-8a03-2c7e1b9f04d6 -->
-<!-- last-edited: 2026-08-05 -->
+<!-- last-edited: 2026-08-07 -->
 
 # Implementation handoff — transcodarr
 
@@ -643,6 +643,22 @@ Each of these cost real time. They are not hypothetical.
 6. **A checker that finds problems is not automatically right.** A column-drift
    script reported 6 bad tables; the real cause was the parser taking one token
    per line while the DDL packs several. Verify a finding before reporting it.
+7. **A piped verification command reports the pipe's exit code, not the
+   command's.** `cargo test --workspace 2>&1 | tail -30` returned **0** while two
+   tests failed, because a pipeline's status is the last command's and `tail`
+   always succeeds. That nearly buried the `DurabilityTooSlow` flake. It is the
+   same shape as trap 2 — the command did not conclude what the exit code said —
+   so treat them as one habit: `set -o pipefail`, or do not pipe the thing whose
+   verdict you are reading. Note that `grep` inverts the hazard, since it exits 1
+   when it selects nothing, so filtering warnings out of a *passing* command can
+   make it look failed. The repository's own workflows are clean: all three
+   custom ones already `set -euo pipefail`, and no workflow pipes a `cargo`
+   invocation.
+8. **`cargo fmt -- --check` prints ~55 KB of warnings to stderr on a clean
+   tree.** `rustfmt.toml` carries nightly-only options that stable rustfmt
+   reports one per line. They are not findings, and the tree can be perfectly
+   formatted underneath them — read the exit code, or `2>/dev/null`, rather than
+   scanning the output for trouble.
 
 ## Verified state of the design docs
 
