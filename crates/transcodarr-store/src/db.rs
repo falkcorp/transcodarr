@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/db.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8f5b0c26-3d71-4e94-a15c-72b6e0d38a4f
-// last-edited: 2026-08-03
+// last-edited: 2026-08-07
 //! Opening the database: pragmas, migrations, and the startup durability probe.
 
 use std::fs::OpenOptions;
@@ -59,23 +59,38 @@ pub struct Db {
 impl Db {
     /// Open (creating if needed), apply pragmas, verify durability, migrate.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::open_inner(path, true)
+        Self::open_inner(path, Some(FSYNC_ABORT_US))
     }
 
     /// Open without the durability probe. For tests and for in-memory use,
     /// where measuring fsync latency measures nothing.
     pub fn open_unchecked(path: &Path) -> Result<Self, StoreError> {
-        Self::open_inner(path, false)
+        Self::open_inner(path, None)
     }
 
-    fn open_inner(path: &Path, probe: bool) -> Result<Self, StoreError> {
-        if probe {
+    /// Open against an explicit fsync ceiling.
+    ///
+    /// Exists so the probe itself can be tested. No real filesystem can be made
+    /// to fsync reliably *slower* than a fixed limit — that is what made the
+    /// failures this replaces nondeterministic — but every real filesystem is
+    /// slower than zero, and none is slower than `u128::MAX`. Moving the limit
+    /// instead of the hardware turns an untestable guard into two deterministic
+    /// assertions.
+    #[cfg(test)]
+    fn open_with_fsync_limit(path: &Path, limit_us: u128) -> Result<Self, StoreError> {
+        Self::open_inner(path, Some(limit_us))
+    }
+
+    /// `fsync_limit_us` of `None` skips the durability probe entirely; `Some`
+    /// runs it and refuses to open above that ceiling.
+    fn open_inner(path: &Path, fsync_limit_us: Option<u128>) -> Result<Self, StoreError> {
+        if let Some(limit_us) = fsync_limit_us {
             let dir = path.parent().unwrap_or(Path::new("."));
             let p99 = measure_fsync_p99(dir, 200)?;
-            if p99 > FSYNC_ABORT_US {
+            if p99 > limit_us {
                 return Err(StoreError::DurabilityTooSlow {
                     p99_us: p99,
-                    limit_us: FSYNC_ABORT_US,
+                    limit_us,
                     path: dir.display().to_string(),
                 });
             }
@@ -241,7 +256,7 @@ mod tests {
 
     fn open_temp() -> (TempDir, Db) {
         let d = TempDir::new().unwrap();
-        let db = Db::open(&d.path().join("t.db")).unwrap();
+        let db = Db::open_unchecked(&d.path().join("t.db")).unwrap();
         (d, db)
     }
 
@@ -261,9 +276,9 @@ mod tests {
         let d = TempDir::new().unwrap();
         let p = d.path().join("t.db");
         {
-            Db::open(&p).unwrap();
+            Db::open_unchecked(&p).unwrap();
         }
-        let db = Db::open(&p).unwrap();
+        let db = Db::open_unchecked(&p).unwrap();
         assert_eq!(db.schema_version().unwrap(), 1);
     }
 
@@ -458,12 +473,51 @@ mod tests {
             .expect("once resolved, a new intent on the same path is fine");
     }
 
+    // The durability probe had no test of its own. Until now the only thing
+    // exercising it was its own intermittent failure on macOS, where
+    // /var/folders fsync p99 sits just over the 100 ms ceiling under load — a
+    // different test failing on each run, none of them about durability. That
+    // is not coverage; it is a guard nobody had ever watched succeed *or* fail
+    // on purpose.
+    //
+    // These two are a pair on purpose. The refusal alone would still pass if
+    // `open_inner` had been broken to reject everything, so the acceptance case
+    // is what proves the refusal means something.
+
+    #[test]
+    fn the_durability_probe_refuses_a_filesystem_slower_than_its_ceiling() {
+        let d = TempDir::new().unwrap();
+        let err = match Db::open_with_fsync_limit(&d.path().join("t.db"), 0) {
+            Ok(_) => panic!("a zero-microsecond ceiling must refuse every real filesystem"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                err,
+                StoreError::DurabilityTooSlow {
+                    limit_us: 0,
+                    p99_us,
+                    ..
+                } if p99_us > 0
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_durability_probe_accepts_a_filesystem_within_its_ceiling() {
+        let d = TempDir::new().unwrap();
+        let db = Db::open_with_fsync_limit(&d.path().join("t.db"), u128::MAX)
+            .expect("an unbounded ceiling must accept any filesystem");
+        assert_eq!(db.schema_version().unwrap(), 1);
+    }
+
     #[test]
     fn a_changed_migration_is_refused_rather_than_reapplied() {
         let d = TempDir::new().unwrap();
         let p = d.path().join("t.db");
         {
-            Db::open(&p).unwrap();
+            Db::open_unchecked(&p).unwrap();
         }
         // Simulate the binary's migration text having changed since it ran.
         {
@@ -474,7 +528,7 @@ mod tests {
             )
             .unwrap();
         }
-        let err = match Db::open(&p) {
+        let err = match Db::open_unchecked(&p) {
             Ok(_) => panic!("a changed migration must not be accepted"),
             Err(e) => e,
         };
