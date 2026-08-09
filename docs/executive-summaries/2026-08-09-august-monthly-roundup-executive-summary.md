@@ -1,5 +1,5 @@
 <!-- file: docs/executive-summaries/2026-08-09-august-monthly-roundup-executive-summary.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 78440435-1fc7-4afc-80c9-19c3ceff169d -->
 <!-- last-edited: 2026-08-09 -->
 
@@ -9,7 +9,7 @@
 covering 2026-08-01 through 2026-08-08 (63 merged pull requests; 325 files
 changed, +37,317/−1,740 lines across 64 commits)
 **Prepared:** 2026-08-09
-**Related doc:** [2026-06-30-june-monthly-roundup-executive-summary.md](2026-06-30-june-monthly-roundup-executive-summary.md)
+**Related docs:** [June roundup](2026-06-30-june-monthly-roundup-executive-summary.md) · [July roundup](2026-07-31-july-monthly-roundup-executive-summary.md)
 — June's one-line change that disabled automated testing, repaired this month
 in #53.
 

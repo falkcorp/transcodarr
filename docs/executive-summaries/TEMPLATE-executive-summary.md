@@ -1,5 +1,5 @@
 <!-- file: docs/executive-summaries/TEMPLATE-executive-summary.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 621ee658-156a-41e2-a502-8971466b89f9 -->
 <!-- last-edited: 2026-08-09 -->
 
@@ -115,6 +115,16 @@ to external causes such as an upstream outage.>
 - [June 2026 roundup](2026-06-30-june-monthly-roundup-executive-summary.md) —
   a deliberately short one. Three pull requests, one of which caused seven
   weeks of damage. Shows how to write a quiet month honestly.
+- [July 2026 roundup](2026-07-31-july-monthly-roundup-executive-summary.md) —
+  a month whose output was a design rather than code, where the pull-request
+  count badly understates the value. Also shows how to handle a counting seam
+  between two roundups without hiding it.
 - [August 2026 roundup](2026-08-09-august-monthly-roundup-executive-summary.md)
   — the full shape. 63 pull requests grouped into eight themes, with a
   fourteen-item highest-risk list and an explicit *what did not get done*.
+
+Read as a set, the three make a point no single one does: June looks like
+nothing happened, July looks quiet, August looks enormous. But June's one-line
+mistake created a large share of August's cost, and July's design is what let
+August move at all. **A month's pull-request count is a poor proxy for its
+value in either direction** — which is the argument for writing these at all.

@@ -1,5 +1,5 @@
 <!-- file: docs/executive-summaries/2026-06-30-june-monthly-roundup-executive-summary.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 4e2477ad-dffc-4618-a4ee-ee07a788729e -->
 <!-- last-edited: 2026-08-09 -->
 
@@ -9,7 +9,7 @@
 all merged 2026-06-13 (3 merged pull requests; 13 files changed, +99/−255
 lines). One further pull request, #7, was opened 2026-06-16 and never merged.
 **Prepared:** 2026-08-09, retrospectively.
-**Related doc:** [2026-08-09-august-monthly-roundup-executive-summary.md](2026-08-09-august-monthly-roundup-executive-summary.md)
+**Related docs:** [July roundup](2026-07-31-july-monthly-roundup-executive-summary.md) · [August roundup](2026-08-09-august-monthly-roundup-executive-summary.md)
 — the month in which this project was actually built, and in which June's one
 lasting side effect was found and repaired.
 
