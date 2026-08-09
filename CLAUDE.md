@@ -1,7 +1,7 @@
 <!-- file: CLAUDE.md -->
-<!-- version: 2.5.1 -->
+<!-- version: 2.6.0 -->
 <!-- guid: 3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f -->
-<!-- last-edited: 2026-08-04 -->
+<!-- last-edited: 2026-08-09 -->
 
 # CLAUDE.md
 
@@ -35,10 +35,19 @@ workflows are retired.
 
 ## Canonical Source for Agent Instructions
 
-- General and language-specific rules: `.github/instructions/` (all code style, documentation, and
-  workflow rules are here)
+- General and language-specific rules: **`.standards/instructions/`** — the
+  `falkcorp/.github` submodule, shared by every repository in the org. Clone
+  with `--recurse-submodules` or it will be empty.
+- Shared document templates: **`.standards/templates/`** (e.g. the executive
+  summary template). Reference them; do not copy them into this repository.
 - Prompts: `.github/prompts/`
 - System documentation: `.github/copilot-instructions.md`
+
+This section previously named `.github/instructions/` as the canonical source.
+**That directory has never existed in this repository** — it is a per-repo copy
+carried by other repos in the org, and pointing at it here sent agents to a path
+that is not present. The rules genuinely in force are the ones under
+`.standards/`, which is why they are named above.
 
 For all agent, Claude, or workflow tasks, **refer to the above files**. Do not duplicate or override
 these rules elsewhere.
