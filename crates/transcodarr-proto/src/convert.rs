@@ -1,7 +1,7 @@
 // file: crates/transcodarr-proto/src/convert.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 6d92f108-4b73-4a15-8c2e-01fb7d3a6592
-// last-edited: 2026-08-06
+// last-edited: 2026-08-10
 //! The boundary between generated types and domain types.
 //!
 //! Everything here exists to stop one class of bug: a value this build does not
@@ -28,7 +28,7 @@
 
 use transcodarr_core::capability::{
     AgentClass, Capability, ContainerId, DecoderCapability, DecoderKind, DecoderStatus,
-    DecoderTriple, Mount, Platform,
+    DecoderTriple, Mount, Platform, TransportMode,
 };
 use transcodarr_core::plan::{BitDepth, EncoderId};
 
@@ -326,6 +326,14 @@ impl TryFrom<pb::Capability> for Capability {
             .map(|c| agent_class_from_str(c))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Read before `decoders` is consumed below: the generated accessor
+        // borrows the whole message, and moving a field out first makes it
+        // unavailable.
+        let transport = match v.transport() {
+            pb::TransportMode::TmMount => TransportMode::Mount,
+            pb::TransportMode::TmStream => TransportMode::Stream,
+        };
+
         let decoders = v
             .decoders
             .into_iter()
@@ -339,6 +347,12 @@ impl TryFrom<pb::Capability> for Capability {
         };
 
         Ok(Self {
+            // Carried for the same reason the muxers below are, and it is the
+            // same boundary that dropped those. A transport lost here silently
+            // becomes `Mount`, and a streaming agent -- which advertises no
+            // mounts at all -- would then satisfy no job's `MountCovers` and be
+            // handed nothing, forever, while reporting healthy.
+            transport,
             classes,
             encoders: v
                 .encoders
@@ -373,6 +387,13 @@ impl TryFrom<Capability> for pb::Capability {
         // disagree with what it actually sent.
         let capability_hash = v.hash();
         Ok(Self {
+            // The outbound half of the boundary, and the half that actually
+            // caused the muxers outage: the inbound conversion was fine and the
+            // field was never put on the wire in the first place.
+            transport: match v.transport {
+                TransportMode::Mount => pb::TransportMode::TmMount as i32,
+                TransportMode::Stream => pb::TransportMode::TmStream as i32,
+            },
             platform: match v.platform {
                 Some(p) => platform_to_str(p)?.to_string(),
                 None => String::new(),
@@ -573,6 +594,7 @@ mod tests {
     #[test]
     fn a_capability_round_trips_through_the_wire() {
         let core = Capability {
+            transport: TransportMode::Stream,
             classes: vec![AgentClass::Audio, AgentClass::Cpu],
             encoders: vec![EncoderId::Eac3, EncoderId::Copy],
             muxers: Vec::new(),
@@ -601,6 +623,7 @@ mod tests {
     #[test]
     fn the_wire_capability_carries_the_hash_of_the_document_it_came_from() {
         let core = Capability {
+            transport: TransportMode::Stream,
             classes: vec![AgentClass::Audio],
             effective_cores: 4.0,
             ..Default::default()
@@ -642,6 +665,7 @@ mod tests {
     #[test]
     fn muxers_survive_the_round_trip() {
         let core = Capability {
+            transport: TransportMode::Stream,
             classes: vec![AgentClass::Audio],
             muxers: vec![ContainerId::Matroska, ContainerId::Mp4],
             ..Default::default()

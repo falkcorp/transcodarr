@@ -76,6 +76,19 @@ message Mount {
   map<string,bool> workarea_same_device_by_library = 9;
 }
 
+// How an agent gets at the media. Chosen per node.
+enum TransportMode {
+  // Default on purpose: proto3 gives an absent field the zero value, and an
+  // older agent that has never heard of transports must keep behaving exactly
+  // as it did. Silently switching an existing agent to streaming because a new
+  // field defaulted the other way would be the worst way to ship this.
+  TM_MOUNT  = 0;
+  // Server sends the source bytes, agent works on a local copy and sends the
+  // result back, server installs it. The agent needs no share, no credentials
+  // and no knowledge of the server's storage layout.
+  TM_STREAM = 1;
+}
+
 message Capability {
   string   platform              = 1;
   string   arch                  = 2;
@@ -94,6 +107,9 @@ message Capability {
   uint64   workarea_free_bytes   = 13;
   string   capability_hash       = 14;
   map<string,string> labels      = 15;
+  // A TM_STREAM agent advertises no mounts and is dispatched work whose
+  // canonical paths it cannot see, because it never resolves them.
+  TransportMode transport        = 16;
 }
 
 // Replayed from the fsynced IntentJournal BEFORE the agent accepts any work.

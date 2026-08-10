@@ -1,7 +1,7 @@
 // file: crates/transcodarr-cli/src/agent.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: e5a20c74-9b18-4d36-8fa1-72c604e9351d
-// last-edited: 2026-08-06
+// last-edited: 2026-08-10
 //! `transcodarr agent` — run a worker, or ask it what it thinks it is.
 //!
 //! `connect` runs until stopped. `survey` prints the same capability document
@@ -17,6 +17,7 @@ use clap::{Args, Subcommand};
 use transcodarr_agent::ExecutorConfig;
 use transcodarr_agent::run::{self, RunConfig};
 use transcodarr_agent::survey::{self, MountSpec, SurveyConfig};
+use transcodarr_core::capability::TransportMode;
 
 /// Worker-side commands.
 #[derive(Subcommand, Debug)]
@@ -48,6 +49,21 @@ pub struct SurveyArgs {
     /// An operator label, as `key=value`. Repeatable.
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
+
+    /// How this agent reaches media.
+    ///
+    /// `mount` reads and writes the library directly through a share, with the
+    /// server translating canonical paths to this node's local paths. It is the
+    /// default and the cheaper of the two whenever a share is genuinely
+    /// available.
+    ///
+    /// `stream` has the server send the source bytes, work on a local copy, and
+    /// send the result back for the server to install. It needs no share, no
+    /// credentials, and no knowledge of the server's storage layout — which is
+    /// what makes it the answer for a node whose share mappings live in a logon
+    /// session the agent does not run in, as they do on Windows.
+    #[arg(long = "transport", value_name = "MODE", default_value = "mount")]
+    pub transport: TransportArg,
 
     /// The ffmpeg binary.
     #[arg(long, default_value = "ffmpeg")]
@@ -99,12 +115,29 @@ fn survey_only(args: SurveyArgs) -> Result<()> {
     println!("ffprobe           {}", capability.ffprobe_version);
     println!("capability hash   {}", capability.capability_hash);
 
+    let streaming = capability.transport() == transcodarr_agent::pb::TransportMode::TmStream;
+    println!(
+        "transport         {}",
+        if streaming { "stream" } else { "mount" }
+    );
+
     if capability.mounts.is_empty() {
         println!("\nmounts            none");
-        println!(
-            "\nThis agent offers no mounts, so it can be given no work: every job \
-             requires a mount covering its library."
-        );
+        // Under streaming this is the expected state, not a fault. Printing the
+        // mount-mode warning here would send an operator hunting for a share
+        // problem on a node that is deliberately not using one.
+        if streaming {
+            println!(
+                "\nThis agent streams: the server sends it the source bytes and \
+                 installs the result, so it needs no mounts and offers none."
+            );
+        } else {
+            println!(
+                "\nThis agent offers no mounts, so it can be given no work: every job \
+                 requires a mount covering its library. Either pass --mount, or run it \
+                 with --transport stream."
+            );
+        }
     } else {
         println!("\nmounts");
         for m in &capability.mounts {
@@ -196,7 +229,30 @@ fn survey_config(args: &SurveyArgs) -> Result<SurveyConfig> {
         work_dir: args.work_dir.display().to_string(),
         mounts,
         labels: survey::parse_labels(&args.labels),
+        transport: args.transport.into(),
     })
+}
+
+/// `--transport` as the CLI spells it.
+///
+/// A separate type from [`TransportMode`] so the wire and domain enum stays
+/// free of clap derives, and so the flag's spelling can change without touching
+/// the protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TransportArg {
+    /// Read and write the library directly through a share.
+    Mount,
+    /// Receive the bytes, work locally, send the result back.
+    Stream,
+}
+
+impl From<TransportArg> for TransportMode {
+    fn from(v: TransportArg) -> Self {
+        match v {
+            TransportArg::Mount => TransportMode::Mount,
+            TransportArg::Stream => TransportMode::Stream,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +264,7 @@ mod tests {
             work_dir: PathBuf::from("/w"),
             mounts: mounts.into_iter().map(String::from).collect(),
             labels: Vec::new(),
+            transport: TransportArg::Mount,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
