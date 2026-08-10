@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/survey.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 3d92b0a7-5c14-4b86-9e02-7fa3b1d6485c
-// last-edited: 2026-08-06
+// last-edited: 2026-08-10
 //! What this machine can actually do, as a capability document.
 //!
 //! Every value here is *measured*, never assumed, and the difference matters at
@@ -32,7 +32,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use transcodarr_core::capability::{AgentClass, Capability, ContainerId, Mount, Platform};
+use transcodarr_core::capability::{
+    AgentClass, Capability, ContainerId, Mount, Platform, TransportMode,
+};
 use transcodarr_core::plan::EncoderId;
 use transcodarr_proto::pb;
 
@@ -68,9 +70,14 @@ pub struct SurveyConfig {
     /// Where this agent stages output.
     pub work_dir: String,
     /// The mounts it offers.
+    ///
+    /// Empty under [`TransportMode::Stream`], where the agent never resolves a
+    /// canonical path and has nothing to offer coverage of.
     pub mounts: Vec<MountSpec>,
     /// Operator labels, e.g. `rack=1`.
     pub labels: Vec<(String, String)>,
+    /// How this agent reaches media. Chosen per node by the operator.
+    pub transport: TransportMode,
 }
 
 /// Survey this machine and produce the document to register with.
@@ -83,6 +90,9 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
     let muxers = available_muxers(&config.ffmpeg);
 
     let document = Capability {
+        // The agent declares how it reaches media; the operator chooses it per
+        // node with `--transport`.
+        transport: config.transport,
         classes: classes_for(&encoders),
         encoders: encoders.clone(),
         muxers,

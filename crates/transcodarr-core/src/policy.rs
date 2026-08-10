@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
-// last-edited: 2026-08-03
+// last-edited: 2026-08-10
 //! The rules engine, and `Default Space Saver`.
 //!
 //! Rules are an ordered list of typed `when`/`then` entries evaluated
@@ -620,6 +620,7 @@ pub fn default_space_saver() -> Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::TransportMode;
     use crate::capability::{
         Capability, DecoderCapability, DecoderStatus, Mount, Platform, satisfies,
     };
@@ -732,6 +733,7 @@ mod tests {
         // The GPU node advertises NVENC but not libx265, so it fails to match
         // *before* dispatch rather than failing at runtime with exit 69.
         let gpu = Capability {
+            transport: TransportMode::Mount,
             classes: vec![AgentClass::Gpu],
             encoders: vec![EncoderId::HevcNvenc],
             muxers: vec![ContainerId::Matroska],

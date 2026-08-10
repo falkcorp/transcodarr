@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/capability.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 3f81c5d9-2a64-4e07-b93a-6c05d81ef742
-// last-edited: 2026-08-03
+// last-edited: 2026-08-10
 //! What an agent can do, what a job needs, and whether they match.
 //!
 //! This is the fix for the failure mode that motivated the whole project: a job
@@ -140,6 +140,14 @@ pub struct Mount {
 /// The full capability document an agent advertises.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Capability {
+    /// How this agent gets at the media.
+    ///
+    /// Defaulted rather than required so an older agent, which has no notion of
+    /// transport, deserialises as [`TransportMode::Mount`] — the behaviour it
+    /// already had. A new field that silently changed an existing agent's
+    /// transport would be the worst possible way to introduce this.
+    #[serde(default)]
+    pub transport: TransportMode,
     /// Work classes this agent accepts.
     pub classes: Vec<AgentClass>,
     /// Encoders available.
@@ -176,6 +184,112 @@ impl Capability {
         // hash between builds.
         let json = serde_json::to_string(self).unwrap_or_default();
         blake3::hash(json.as_bytes()).to_hex().to_string()
+    }
+}
+
+/// How an agent gets at the media it is asked to work on.
+///
+/// Chosen per node, because the two modes trade different things. A node that
+/// can see the library over a network share reads and writes it directly and
+/// nothing is copied twice. A node that cannot — because it is on another
+/// network, or its share mappings live in a logon session the agent does not
+/// run in — is handed the bytes instead and never learns where they came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TransportMode {
+    /// The agent reads and writes the media itself, through a mount, with the
+    /// server translating canonical paths to that node's local paths.
+    ///
+    /// The default: it is what every agent did before the second mode existed,
+    /// and it is the cheaper of the two whenever a share is genuinely available.
+    #[default]
+    Mount,
+    /// The server sends the source bytes, the agent works on a local copy and
+    /// sends the result back, and the server installs it.
+    ///
+    /// The agent needs no share, no credentials, and no knowledge of the
+    /// server's storage layout. It costs two extra copies of the file over the
+    /// network, which is the price of that independence.
+    Stream,
+}
+
+impl TransportMode {
+    /// Whether an agent in this mode needs a mount covering a path to work on
+    /// it.
+    ///
+    /// This is the whole behavioural difference at dispatch time. A streaming
+    /// agent is handed bytes, so a path it cannot see is not an obstacle — and
+    /// treating it as one would make the mode useless, since a streaming node
+    /// covers no canonical prefixes at all.
+    pub fn requires_mount_coverage(self) -> bool {
+        matches!(self, TransportMode::Mount)
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    fn streaming_agent() -> Capability {
+        Capability {
+            transport: TransportMode::Stream,
+            classes: vec![AgentClass::Audio],
+            encoders: vec![EncoderId::Eac3],
+            muxers: vec![ContainerId::Matroska],
+            decoders: Vec::new(),
+            effective_cores: 8.0,
+            // The whole point: a streaming node advertises none.
+            mounts: Vec::new(),
+            platform: Some(Platform::Windows),
+            workarea_free_bytes: 1 << 40,
+            labels: Vec::new(),
+        }
+    }
+
+    /// The defect this mode exists to fix. A node that cannot see the library
+    /// must still be dispatchable, or streaming buys nothing.
+    #[test]
+    fn a_streaming_agent_matches_a_job_whose_path_it_cannot_see() {
+        let reqs = Requirements(vec![
+            Requirement::Muxer(ContainerId::Matroska),
+            Requirement::MountCovers("/mnt/media/tv".into()),
+        ]);
+        assert!(
+            satisfies(&streaming_agent(), &reqs).is_ok(),
+            "a streaming agent is sent the bytes; it never resolves the path"
+        );
+    }
+
+    /// The paired positive, without which the test above would still pass if
+    /// `MountCovers` had simply been deleted.
+    #[test]
+    fn a_mount_agent_with_no_mounts_still_fails_the_same_job() {
+        let mut agent = streaming_agent();
+        agent.transport = TransportMode::Mount;
+        let reqs = Requirements(vec![Requirement::MountCovers("/mnt/media/tv".into())]);
+        let err = satisfies(&agent, &reqs).expect_err("mount mode must still require coverage");
+        assert!(err.detail.contains("no writable mount covers"), "{err:?}");
+    }
+
+    /// Transport must not become a way to skip a real capability check.
+    #[test]
+    fn streaming_does_not_excuse_a_missing_encoder() {
+        let reqs = Requirements(vec![Requirement::Encoder(EncoderId::HevcNvenc)]);
+        assert!(
+            satisfies(&streaming_agent(), &reqs).is_err(),
+            "streaming changes where the bytes come from, not what the agent can encode"
+        );
+    }
+
+    /// An agent built before this field existed must keep its old behaviour.
+    #[test]
+    fn a_capability_without_a_transport_field_deserialises_as_mount() {
+        let json = r#"{
+            "classes": [], "encoders": [], "muxers": [], "decoders": [],
+            "effective_cores": 1.0, "mounts": [], "platform": null,
+            "workarea_free_bytes": 0, "labels": []
+        }"#;
+        let cap: Capability = serde_json::from_str(json).expect("older document must still parse");
+        assert_eq!(cap.transport, TransportMode::Mount);
     }
 }
 
@@ -318,10 +432,18 @@ pub fn satisfies(cap: &Capability, req: &Requirements) -> Result<(), UnmetRequir
                 }
             }
             Requirement::MountCovers(prefix) => {
-                let covered = cap
-                    .mounts
-                    .iter()
-                    .any(|m| prefix.starts_with(&m.canonical_prefix) && m.writable);
+                // A streaming agent is sent the bytes and never resolves this
+                // path, so requiring it to see the path would make the mode
+                // unusable: such a node covers no canonical prefixes at all and
+                // would match nothing. The requirement still rides on the job,
+                // because the same job must remain dispatchable to a mount-mode
+                // agent, and because the server needs the canonical path either
+                // way -- to translate it, or to read the bytes from.
+                let covered = !cap.transport.requires_mount_coverage()
+                    || cap
+                        .mounts
+                        .iter()
+                        .any(|m| prefix.starts_with(&m.canonical_prefix) && m.writable);
                 if !covered {
                     return Err(unmet(format!(
                         "no writable mount covers {prefix}; agent sees {:?}",
@@ -357,6 +479,7 @@ mod tests {
 
     fn turing_gpu() -> Capability {
         Capability {
+            transport: TransportMode::Mount,
             classes: vec![AgentClass::Gpu],
             encoders: vec![EncoderId::HevcNvenc],
             muxers: vec![ContainerId::Matroska],

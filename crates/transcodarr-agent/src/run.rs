@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/run.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: c4f7092b-8d31-4e56-a1b0-95d283c74e6f
-// last-edited: 2026-08-06
+// last-edited: 2026-08-10
 //! Starting an agent: survey, open the work area, connect.
 //!
 //! The assembly order is the safety argument, and it is the reverse of what is
@@ -154,6 +154,7 @@ mod tests {
                 work_dir: dir.join("work").display().to_string(),
                 mounts: Vec::new(),
                 labels: Vec::new(),
+                transport: transcodarr_core::capability::TransportMode::Mount,
             },
             executor: ExecutorConfig::default(),
         }
