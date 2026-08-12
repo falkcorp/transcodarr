@@ -255,6 +255,41 @@ impl AgentSession {
 
 #[tonic::async_trait]
 impl pb::agent_service_server::AgentService for AgentSession {
+    // ------------------------------------------------- TM_STREAM transport --
+    //
+    // The wire contract for streaming exists; the byte plumbing behind it does
+    // not yet. These refuse explicitly rather than returning an empty stream or
+    // an accepted-but-ignored push, because either would look like success to a
+    // caller and produce a job that reports done having moved nothing.
+    //
+    // A `TM_MOUNT` agent never reaches these. A `TM_STREAM` agent gets a clear
+    // reason at the first call instead of a silent failure later, which is the
+    // difference between "not built yet" and "mysteriously does nothing".
+
+    type FetchSourceStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FileChunk, Status>>;
+
+    async fn fetch_source(
+        &self,
+        _request: Request<pb::FetchSourceRequest>,
+    ) -> Result<Response<Self::FetchSourceStream>, Status> {
+        Err(Status::unimplemented(
+            "streaming transport is not built yet: the server cannot serve source \
+             bytes. Run this agent with --transport mount, or wait for the \
+             FetchSource implementation.",
+        ))
+    }
+
+    async fn push_output(
+        &self,
+        _request: Request<tonic::Streaming<pb::FileChunk>>,
+    ) -> Result<Response<pb::PushOutputResponse>, Status> {
+        Err(Status::unimplemented(
+            "streaming transport is not built yet: the server cannot accept output \
+             bytes or install them. Run this agent with --transport mount, or wait \
+             for the PushOutput implementation.",
+        ))
+    }
+
     async fn register(
         &self,
         request: Request<pb::RegisterRequest>,

@@ -18,6 +18,55 @@ package transcodarr.v1;
 service AgentService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+
+  // ---- TM_STREAM only. A TM_MOUNT agent never calls either of these. ----
+
+  // Pull the source down. The agent writes it into its own work area and never
+  // learns where it came from: `source_path` in the assignment is a canonical
+  // path it cannot resolve, and under streaming it is an identifier rather than
+  // a location.
+  rpc FetchSource(FetchSourceRequest) returns (stream FileChunk);
+
+  // Push the finished output back. The server stages it and performs the commit
+  // ritual itself, because a streaming agent has no path to the destination and
+  // could not install it if it wanted to.
+  rpc PushOutput(stream FileChunk) returns (PushOutputResponse);
+}
+
+message FetchSourceRequest {
+  string job_id        = 1;
+  uint32 attempt       = 2;
+  // Rejected if stale, exactly as a CommitReport is. An agent fenced out must
+  // not be able to pull bytes for work it no longer owns.
+  uint64 fencing_epoch = 3;
+}
+
+// One slice of a file, in order.
+//
+// `offset` is carried rather than implied so a short read is detectable: a
+// receiver that has written 900 MB and is handed a chunk claiming offset 0 knows
+// the stream restarted, instead of appending and producing a corrupt file that
+// is the right length.
+message FileChunk {
+  string job_id  = 1;
+  uint32 attempt = 2;
+  uint64 offset  = 3;
+  bytes  data    = 4;
+  // Set on the final chunk. An explicit end beats "the stream closed", which is
+  // indistinguishable from the sender dying mid-file.
+  bool   last    = 5;
+  // blake3 of the whole file, on the last chunk only. The receiver verifies
+  // before acting: a truncated transfer that is never checked is exactly the
+  // failure the duration gate exists to catch on the encode side.
+  string content_sig = 6;
+}
+
+message PushOutputResponse {
+  bool   accepted = 1;
+  // Why not, when refused. A rejection is a clean answer with a reason, never a
+  // partial write left on the server.
+  string reason   = 2;
+  uint64 bytes_received = 3;
 }
 
 // agent_id is operator-assigned and stable ("u1", "win-rtx2070").
