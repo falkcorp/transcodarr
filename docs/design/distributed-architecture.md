@@ -1,7 +1,7 @@
 <!-- file: docs/design/distributed-architecture.md -->
-<!-- version: 1.1.1 -->
+<!-- version: 1.2.0 -->
 <!-- guid: f15e2f8e-1e3b-4ac5-a124-9ce13a18ab26 -->
-<!-- last-edited: 2026-08-04 -->
+<!-- last-edited: 2026-08-12 -->
 
 # transcodarr — Distributed Transcode Orchestrator
 
@@ -977,6 +977,45 @@ The agent replays its fsynced `IntentJournal` and `InflightJournal` **before** s
 ## Agent Protocol
 
 One unary RPC for the handshake and one long-lived bidirectional stream for everything else. A single stream means connection liveness *is* agent liveness, ordering is guaranteed, and there is no way for one channel to be healthy while another is wedged.
+
+### Transport modes
+
+There are **two** ways an agent reaches media, chosen per node by the operator with `--transport`. Earlier revisions of this document described only the first and stated `MountCovers` as an unconditional requirement, which made the second impossible to express. That was a defect in this document, not a decision: a node with no usable share was undispatchable no matter how good its encoder was.
+
+| | `TM_MOUNT` | `TM_STREAM` |
+|---|---|---|
+| Reaches media by | a share, with per-node path translation | bytes over the agent connection |
+| Advertises mounts | yes | **no** — it resolves no canonical paths |
+| Needs server storage layout | yes | no |
+| Performs the commit ritual | the agent | **the server** |
+| `MountCovers` applies | yes | no |
+
+`TM_MOUNT` is the zero value on purpose. proto3 gives an absent field the zero value, so an agent that has never heard of transports keeps behaving exactly as it did. Silently switching an existing agent to streaming because a new field defaulted the other way would be the worst possible way to introduce this.
+
+#### Why the server commits in streaming mode
+
+A streaming agent has no path to the destination. It receives bytes, encodes, and returns bytes; it *cannot* perform the nine-step ritual — rename original to trash, install replacement, resolve the intent — because every path in it is one the agent cannot see. So under `TM_STREAM` the ritual moves server-side and runs exactly as it does for `admin run`, with the same ordering: the ledger intent is granted **before** anything on disk is touched, resolved afterwards whatever happened, and the `trash_entry` row written only once the original really is in the trash.
+
+This is not a new shape. It is the one already specified for a WSL2 node failing `RenameProbe`, where "the GPU agent becomes produce-only and a U0-local agent performs commits". Produce-only *is* streaming mode's agent.
+
+#### The two byte-moving RPCs
+
+```protobuf
+rpc FetchSource(FetchSourceRequest) returns (stream FileChunk);
+rpc PushOutput(stream FileChunk) returns (PushOutputResponse);
+```
+
+Both are `TM_STREAM` only; a `TM_MOUNT` agent never calls either. `FetchSourceRequest` carries a `fencing_epoch` and is rejected when stale, exactly as a `CommitReport` is — an agent fenced out must not be able to pull bytes for work it no longer owns.
+
+`FileChunk` carries its own `offset` rather than implying it, so a short read is detectable: a receiver that has written 900 MB and is handed a chunk claiming offset zero knows the stream restarted, instead of appending and producing a corrupt file of an entirely plausible length. The final chunk sets `last` and carries a blake3 of the whole file, and the receiver verifies before acting.
+
+That hash is the gate that matters. **A truncated transfer is smaller, and size is never an accept criterion** — the same rule the duration gate enforces on the encode side. Without the hash, a half-received encode installs cleanly over a good original.
+
+An explicit `last` beats "the stream closed", which is indistinguishable from the sender dying mid-file.
+
+#### Consequence for dispatch
+
+`Requirement::MountCovers` is satisfied automatically by a `TM_STREAM` agent, because coverage of a path it never resolves is not a meaningful question. This is a dispatch-matching change, not merely a file-copying feature: it is what makes a mountless node eligible for work at all.
 
 ### The `.proto` file
 
