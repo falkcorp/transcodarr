@@ -31,6 +31,7 @@ pub mod schedule;
 pub mod serve;
 pub mod session;
 pub mod summary;
+pub mod transfer;
 
 pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
 pub use dispatch::{AgentEntry, Assignment, Blocked, DispatchRound, Dispatcher, QueuedJob};
