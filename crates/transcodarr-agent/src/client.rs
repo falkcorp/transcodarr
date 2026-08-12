@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/client.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 0f5d8c31-97b4-42ae-b6d0-58e19c3a7042
-// last-edited: 2026-08-05
+// last-edited: 2026-08-12
 //! The agent side of the transport: register, connect, stay connected.
 //!
 //! The server half of this lives in `transcodarr-server::session`, and the
@@ -426,6 +426,35 @@ impl Shutdown {
     fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
+
+    /// Resolves once stopped — **including when it was already stopped before
+    /// this was called**.
+    ///
+    /// Awaiting `notify.notified()` directly is the wrong thing and the reason
+    /// this method exists. `notify_waiters` wakes only the tasks already parked
+    /// at the instant it runs and stores no permit, so the signal is lost
+    /// whenever [`Shutdown::stop`] lands while this task is somewhere else —
+    /// mid-recovery, mid-register, mid-dispatch. The task then parks on a
+    /// notification that has already been and gone. That is not a slow
+    /// shutdown, it is a permanent one: it cost a CI job 26 hours parked on a
+    /// condvar at zero CPU.
+    ///
+    /// The ordering argument: `stop` stores the flag *before* it notifies, and
+    /// this registers as a waiter *before* it reads the flag. So either the
+    /// read below sees `true`, or the notify that follows it is guaranteed to
+    /// reach an already-registered waiter. There is no interleaving in which
+    /// both are missed.
+    async fn cancelled(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        // Registers interest without awaiting. This line is the fix; moving it
+        // below the check reopens the race.
+        notified.as_mut().enable();
+        if self.is_stopped() {
+            return;
+        }
+        notified.await;
+    }
 }
 
 /// Registers, connects, and keeps connected.
@@ -497,7 +526,7 @@ impl<W: Worker> ConnectClient<W> {
             tracing::info!(?delay, attempt, "reconnecting");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = self.shutdown.notify.notified() => break,
+                _ = self.shutdown.cancelled() => break,
             }
         }
         tracing::info!("agent client stopped");
@@ -570,7 +599,7 @@ impl<W: Worker> ConnectClient<W> {
 
         loop {
             tokio::select! {
-                _ = self.shutdown.notify.notified() => return Ok(()),
+                _ = self.shutdown.cancelled() => return Ok(()),
                 message = inbound.message() => {
                     match message {
                         Ok(Some(msg)) => self.dispatch(msg, &link),
@@ -813,5 +842,51 @@ mod tests {
         let p = ReconnectPolicy::default();
         assert!(p.delay(u32::MAX, "boot-a") <= p.max);
         assert!(p.delay(u32::MAX, "boot-a") > Duration::ZERO);
+    }
+
+    fn test_shutdown() -> Shutdown {
+        Shutdown {
+            stopped: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// The lost wakeup, which is the failure that hung a CI job for 26 hours.
+    ///
+    /// `stop` runs while nothing is parked yet — exactly what happens when it
+    /// lands mid-recovery, mid-register or mid-dispatch. `notify_waiters`
+    /// reaches nobody and leaves no permit behind, so a waiter arriving
+    /// afterwards has only the flag to go on.
+    ///
+    /// Note the timeout. The bug this guards against *hangs* rather than
+    /// fails, so an assertion alone would reproduce the disease instead of
+    /// reporting it: without the wrapper, a regression parks this test forever
+    /// and the suite dies with no failing test to point at.
+    #[tokio::test]
+    async fn a_stop_that_precedes_the_waiter_is_still_seen() {
+        let shutdown = test_shutdown();
+        shutdown.stop();
+        tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+            .await
+            .expect("cancelled() must resolve when stop() has already happened");
+    }
+
+    /// The other direction, kept because the obvious fix breaks it: a
+    /// `cancelled` that only polled the flag once and never registered would
+    /// satisfy the test above and leave an already-parked waiter asleep.
+    #[tokio::test]
+    async fn a_waiter_already_parked_is_still_woken() {
+        let shutdown = test_shutdown();
+        let waiter = shutdown.clone();
+        let parked = tokio::spawn(async move { waiter.cancelled().await });
+        // Single-threaded runtime: this hands control to the spawned task and
+        // does not come back until it has parked.
+        tokio::task::yield_now().await;
+
+        shutdown.stop();
+        tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("a waiter parked before stop() must be woken by it")
+            .expect("the waiting task must not panic");
     }
 }
