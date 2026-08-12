@@ -20,6 +20,13 @@ logs/
 # Build artifacts
 dist/
 bin/
+# ...but `src/bin/` is Cargo's convention for *source*, not output. Without this
+# negation the agent binary is silently untracked and a fresh clone builds a
+# workspace with no agent in it -- the same shape as the migration .sql that a
+# global ignore kept out of every commit for weeks, and which made `main`
+# compile on exactly one machine.
+!crates/*/src/bin/
+!crates/*/src/bin/*.rs
 
 # Coverage and reports
 coverage/

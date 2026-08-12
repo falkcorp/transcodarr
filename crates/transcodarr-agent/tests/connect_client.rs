@@ -94,6 +94,25 @@ impl FakeServer {
 
 #[tonic::async_trait]
 impl pb::agent_service_server::AgentService for FakeServer {
+    // Streaming transport is not exercised by these tests. Refusing keeps this
+    // fake honest about what it does: a fake that returned an empty stream here
+    // would let a future streaming test pass while moving no bytes.
+    type FetchSourceStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FileChunk, Status>>;
+
+    async fn fetch_source(
+        &self,
+        _request: Request<pb::FetchSourceRequest>,
+    ) -> Result<Response<Self::FetchSourceStream>, Status> {
+        Err(Status::unimplemented("fake server does not serve bytes"))
+    }
+
+    async fn push_output(
+        &self,
+        _request: Request<tonic::Streaming<pb::FileChunk>>,
+    ) -> Result<Response<pb::PushOutputResponse>, Status> {
+        Err(Status::unimplemented("fake server does not accept bytes"))
+    }
+
     async fn register(
         &self,
         request: Request<pb::RegisterRequest>,

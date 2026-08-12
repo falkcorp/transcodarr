@@ -30,6 +30,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
 transcodarr-proto = { path = "../transcodarr-proto" }
+clap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
