@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.0.0 -->
+<!-- version: 3.0.1 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-12 -->
 
@@ -49,7 +49,7 @@ no workspace feature surgery was needed. 11 MB PE32+ binary, copied to
 `C:\Users\jdfalk\transcodarr-agent.exe`, and its capability survey **ran on the
 box**:
 
-```
+```text
 platform  windows      classes  audio, gpu      transport  stream
 encoders  hevc_nvenc, eac3, ac3, aac            mounts     none
 ```
