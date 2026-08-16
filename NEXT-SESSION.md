@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.4.0 -->
+<!-- version: 3.5.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -102,8 +102,9 @@ or byte ranges.
 
    No constructor change was needed either: the work area is opened per library
    from `library.work_dir`, exactly as `run_library` does.
-3. **The agent-side stream path.** Half done (PR #83) — and the half that was
-   done was not the half this entry described.
+3. ~~**The agent-side stream path.**~~ **Done** (PR #83 server-side argv, PR #84
+   agent-side transfer). Kept below because the way this entry was wrong is the
+   reusable part.
 
    **What this entry got wrong:** it said "under `Stream`, fetch instead of
    reading `source_path`", which assumes `source_path` and `argv` are usable by
@@ -128,35 +129,35 @@ or byte ranges.
    journal (`commit.rs:270/297/322` — `:536` is a test), and a streaming agent
    never runs the ritual. That is the "write down why" this entry asked for.
 
-   ### What is left of step 3
+   ### How step 3 came out (PR #84)
 
-   In `worker.rs::execute`, under `Stream`:
+   `Link` gained a second handle on the same channel plus the agent id, and
+   `stamp` became a free function so the transfer RPCs and `connect()` share
+   one implementation. `worker.rs` branches at the top of `execute` rather than
+   at each step: only encode-and-judge is common to both transports.
 
-   - **Skip `ensure_same_device`** (worker.rs:161) and **`SourceGuard::observe`**
-     (worker.rs:171). Both stat `final_path`, which the agent cannot see. The
-     server builds the guard from the stored file row instead — already done in
-     `push_output`.
-   - **Fetch to `a.source_path`** before encoding. It is now an agent-local path
-     the server chose, so `argv` and `judge()` both already point at it.
-   - **Push instead of `commit_blocking`** (worker.rs:242). Report whatever
-     resolution the server returns.
+   `transfer` **moved to `transcodarr-proto`.** Both ends need the same `Sink`,
+   and the agent cannot depend on `transcodarr-server` (SQLite → unbuildable
+   for Windows). A copy was the only alternative, and `buf.yaml` already argues
+   that case about `FileChunk`.
 
-   **The plumbing is the actual work, and it does not exist yet.** `Link`
-   (client.rs:263–322) only sends messages on the `Connect` stream; there is no
-   fetch or push method, and `stamp()` (client.rs:677) is private and called
-   only at the `connect()` call site (client.rs:580). `FetchSource` and
-   `PushOutput` are separate RPCs needing an `AgentServiceClient<Channel>`
-   plumbed into `LocalWorker` along with identity to stamp. Budget for that, not
-   for a two-line branch.
-
-   **Traps that still apply here:** an unstamped fetch gets an opaque
-   `Unauthenticated`; an in-stream error is fatal, not end-of-stream
-   (`transfer.rs:63`), and a reader that treats it as termination turns a
-   missing source into a zero-byte fetch whose blake3 verifies fine.
+   Every guard was mutation-tested — five in `Link`, three in the worker. The
+   one worth keeping in mind: **deleting the transport branch entirely still
+   left eight of nine tests green.** Only the end-to-end test caught it, and
+   only because its `final_path` names a directory that does not exist on the
+   test machine. Point it at a file that happens to exist locally — the obvious
+   thing to do on a single-machine fixture — and a streaming agent silently
+   taking the mount path passes.
 4. **Prove it locally before Windows.** Server and agent both on the Mac, agent
-   `--transport stream`, a real audio transcode end to end. None of that needs
-   the GPU node. If it works locally, Windows is deployment; if it does not, you
-   debug byte plumbing without mingw, NVENC and logon sessions confounding it.
+   `--transport stream`, a real audio transcode end to end.
+
+   **Partly discharged by PR #84.** `stream_transport.rs`'s
+   `a_streaming_agent_fetches_encodes_and_pushes_real_media` runs real ffmpeg
+   over the real transport: fetch, remux, push, verify the landed file by
+   probing its duration. What it does **not** exercise is the real server —
+   its fixture stubs the database and the commit ritual, so nothing here proves
+   the ledger, the intent, or the install. Run the two real binaries against
+   each other before believing this works.
 5. **Then `windows-rtx2070`:** stream-mode audio, then video with `hevc_nvenc`.
 6. **Mount mode last** — see below, it needs hands on the box.
 
@@ -249,15 +250,17 @@ Do this before running stream mode against anything that matters.
   today: that ffmpeg lists `av1_nvenc` and the hardware cannot do it.
 - That ffmpeg build has **no libx264** — no software video fallback on the box.
 - ICMP is filtered on `windows-rtx2070`. `ping` failing proves nothing; test port 22.
-- **The agent must `stamp()` its fetch requests.** `client.rs` stamps
-  `x-agent-id`/`x-agent-epoch` only at the `connect()` call site. `fetch_source`
-  reads identity from that same metadata and refuses without it, so an unstamped
-  fetch gets an opaque `Unauthenticated`. The two epochs — metadata and request
-  body — must also agree, which they do trivially when both come from `stamp()`.
+- **The agent must `stamp()` its transfer requests.** Every RPC other than
+  `Connect` has to assert its own identity; the stamp that authenticated the
+  stream does not travel. Now held by `stamp_identity` and two tests in
+  `stream_transport.rs` — removing the stamp fails seven of nine.
 - **An in-stream error is fatal, not end-of-stream.** `transfer::source_stream`
-  reports a missing source as a `Status::not_found` *inside* the stream
-  (`transfer.rs:63`). A reader that treats stream errors as termination turns a
-  missing source into a zero-byte fetch — and a blake3 of nothing verifies fine.
+  reports a missing source as a `Status::not_found` *inside* the stream. A
+  reader that treats stream errors as termination turns a missing source into a
+  zero-byte fetch — and a blake3 of nothing verifies fine. Held by
+  `an_error_inside_the_stream_fails_the_fetch_rather_than_ending_it`; the agent
+  uses `Streaming::message()` so the two cases are different types rather than
+  two arms one can forget to write.
 - **`req.attempt` is not checked against `job.attempt`.** Harmless for
   `fetch_source`, where every attempt reads the same source path, so a mislabeled
   chunk still carries correct bytes. **Not** harmless for `push_output`, which

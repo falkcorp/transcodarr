@@ -1,7 +1,7 @@
-// file: crates/transcodarr-server/src/transfer.rs
-// version: 1.0.0
+// file: crates/transcodarr-proto/src/transfer.rs
+// version: 1.1.0
 // guid: 9c1f6b28-4a70-4de3-8f52-6b0d7ae94c11
-// last-edited: 2026-08-12
+// last-edited: 2026-08-16
 //! Moving file bytes for [`TransportMode::Stream`].
 //!
 //! A streaming agent never resolves a canonical path. It is handed the source
@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
-use transcodarr_proto::pb;
+use crate::pb;
 
 /// Bytes per chunk.
 ///
@@ -113,6 +113,85 @@ pub fn source_stream(
             if tx.blocking_send(Ok(chunk)).is_err() {
                 // The agent hung up. Nothing to report to: stop reading rather
                 // than burn I/O on a transfer nobody will receive.
+                return;
+            }
+        }
+    });
+
+    ReceiverStream::new(rx)
+}
+
+/// Chunk an already-open file for a client-streaming RPC.
+///
+/// The mirror of [`source_stream`], and deliberately not a second copy of it:
+/// a client stream carries bare `FileChunk`s with no `Status` to put an error
+/// in, so this cannot report a mid-transfer read failure the way the server
+/// side can.
+///
+/// **It therefore reports failure by omission, which is the safe direction.**
+/// A read error ends the stream *without* the final chunk, so the receiving
+/// [`Sink`] never sees `last`, never verifies a signature, and never declares
+/// the transfer complete. The push is refused and the destination is untouched.
+/// The alternative — synthesising a terminator so the stream ends tidily —
+/// would hand the receiver a truncated file with a signature computed over the
+/// truncation, which verifies perfectly.
+///
+/// The caller opens the file so that "it is not there at all" is an error at
+/// the call site rather than a transfer that starts and mysteriously stops.
+pub fn output_stream(
+    job_id: String,
+    attempt: u32,
+    file: std::fs::File,
+) -> ReceiverStream<pb::FileChunk> {
+    let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
+
+    tokio::task::spawn_blocking(move || {
+        let mut file = file;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; CHUNK_BYTES];
+        let mut offset: u64 = 0;
+
+        loop {
+            let read = match file.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!(
+                        job = %job_id,
+                        offset,
+                        error = %e,
+                        "reading the output to push failed; ending the stream \
+                         without a terminator so the server refuses it"
+                    );
+                    return;
+                }
+            };
+
+            if read == 0 {
+                let _ = tx.blocking_send(pb::FileChunk {
+                    job_id,
+                    attempt,
+                    offset,
+                    data: Vec::new(),
+                    last: true,
+                    content_sig: hasher.finalize().to_hex().to_string(),
+                });
+                return;
+            }
+
+            hasher.update(&buf[..read]);
+            let chunk = pb::FileChunk {
+                job_id: job_id.clone(),
+                attempt,
+                offset,
+                data: buf[..read].to_vec(),
+                last: false,
+                content_sig: String::new(),
+            };
+            offset += read as u64;
+
+            if tx.blocking_send(chunk).is_err() {
+                // The server hung up mid-push. Stop reading rather than burn
+                // I/O on bytes nobody will receive.
                 return;
             }
         }

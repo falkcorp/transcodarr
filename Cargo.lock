@@ -1912,6 +1912,7 @@ name = "transcodarr-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
  "serde",
  "serde_json",
@@ -1958,14 +1959,19 @@ dependencies = [
 name = "transcodarr-proto"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
+ "tracing",
  "transcodarr-core",
 ]
 

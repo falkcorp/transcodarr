@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/client.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 0f5d8c31-97b4-42ae-b6d0-58e19c3a7042
-// last-edited: 2026-08-12
+// last-edited: 2026-08-16
 //! The agent side of the transport: register, connect, stay connected.
 //!
 //! The server half of this lives in `transcodarr-server::session`, and the
@@ -122,6 +122,23 @@ pub enum ClientError {
         /// What it held.
         value: String,
     },
+
+    /// A streamed file transfer did not complete.
+    ///
+    /// Distinct from [`ClientError::Rpc`] because the interesting failures here
+    /// are not transport faults: a source that will not open, a signature that
+    /// does not match, a server that refused the install. Every one of them
+    /// must leave the job failed rather than retried blindly against the same
+    /// bytes.
+    #[error("{what} for {job_id}: {detail}")]
+    Transfer {
+        /// Which half of the transfer.
+        what: &'static str,
+        /// The job it belonged to.
+        job_id: String,
+        /// What went wrong.
+        detail: String,
+    },
 }
 
 /// How long to wait between reconnection attempts.
@@ -223,14 +240,59 @@ impl ClientConfig {
 /// valid across the job — but not across a reconnect: sends on a dead stream
 /// fail, and a commit awaiting a grant that never arrives is refused rather
 /// than assumed.
+///
+/// It carries two different ways of reaching the server, and the difference
+/// matters. `out` is the `Connect` stream, which is already authenticated —
+/// the server knows who is on the far end because it accepted the stream. The
+/// [`TransportMode::Stream`] transfers are *separate* RPCs on the same channel,
+/// so each one has to assert its own identity in metadata; see
+/// [`Link::fetch_source`].
 #[derive(Clone)]
 pub struct Link {
     out: mpsc::Sender<pb::AgentMessage>,
     epoch: Arc<AtomicI64>,
     pending: Pending,
+    /// A second handle on the same channel, for the unary/streaming transfer
+    /// RPCs. Cloned per call: tonic clients need `&mut self` and cloning one is
+    /// a refcount bump, not a new connection.
+    rpc: pb::agent_service_client::AgentServiceClient<Channel>,
+    /// Needed because a transfer RPC must stamp itself. The `Connect` stream
+    /// was stamped once, at the call that opened it, and that stamp does not
+    /// travel to any other RPC.
+    agent_id: String,
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<pb::CommitGrant>>>>;
+
+/// Put an agent's identity into request metadata.
+///
+/// Free rather than a method because *every* RPC this agent makes needs it and
+/// only one of them is made by the client itself. `FetchSource` and
+/// `PushOutput` read identity from exactly this metadata and refuse without it,
+/// so an unstamped transfer fails with an opaque `Unauthenticated` that names
+/// nothing. One implementation, so the two epochs — the one in metadata and the
+/// one in the request body — cannot come to disagree.
+fn stamp_identity(
+    agent_id: &str,
+    epoch: i64,
+    md: &mut tonic::metadata::MetadataMap,
+) -> Result<(), ClientError> {
+    let id = agent_id.parse().map_err(|_| ClientError::BadIdentity {
+        field: AGENT_ID_KEY,
+        value: agent_id.to_string(),
+    })?;
+    md.insert(AGENT_ID_KEY, id);
+
+    let epoch = epoch
+        .to_string()
+        .parse()
+        .map_err(|_| ClientError::BadIdentity {
+            field: AGENT_EPOCH_KEY,
+            value: epoch.to_string(),
+        })?;
+    md.insert(AGENT_EPOCH_KEY, epoch);
+    Ok(())
+}
 
 impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -248,6 +310,15 @@ impl Link {
     /// rejected with the job left untouched.
     pub fn fencing_epoch(&self) -> i64 {
         self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Put this agent's identity on a transfer RPC.
+    ///
+    /// Read at the moment of the call, like every other use of the epoch: a
+    /// re-registration between an assignment and its fetch moves it, and the
+    /// server compares against what the registry holds now.
+    fn stamp(&self, md: &mut tonic::metadata::MetadataMap) -> Result<(), ClientError> {
+        stamp_identity(&self.agent_id, self.fencing_epoch(), md)
     }
 
     /// Send one message, returning whether the stream took it.
@@ -334,6 +405,137 @@ impl Link {
             detail: detail.to_string(),
         }))
         .await
+    }
+
+    /// Pull a job's source down into `dest`.
+    ///
+    /// Returns how many bytes landed. Only for [`TransportMode::Stream`]: a
+    /// mount agent opens the source directly and never calls this.
+    ///
+    /// **A stream error is fatal, never end-of-stream.** The server reports a
+    /// missing source as a `Status` *inside* the stream, so a reader that
+    /// treats any stop as completion turns "there is no source" into a
+    /// zero-byte fetch — and a blake3 of nothing verifies against a signature
+    /// computed over nothing. [`tonic::Streaming::message`] is used rather than
+    /// a `while let Some(Ok(..))` loop precisely because it makes the two cases
+    /// different types instead of two arms one can forget to write.
+    ///
+    /// A failed fetch removes whatever it had written. A partial source left
+    /// behind would be picked up by the encode as if it were whole.
+    pub async fn fetch_source(
+        &self,
+        job_id: &str,
+        attempt: i64,
+        dest: &std::path::Path,
+    ) -> Result<u64, ClientError> {
+        let result = self.fetch_into(job_id, attempt, dest).await;
+        if result.is_err() {
+            let _ = std::fs::remove_file(dest);
+        }
+        result
+    }
+
+    async fn fetch_into(
+        &self,
+        job_id: &str,
+        attempt: i64,
+        dest: &std::path::Path,
+    ) -> Result<u64, ClientError> {
+        let fail = |detail: String| ClientError::Transfer {
+            what: "fetch_source",
+            job_id: job_id.to_string(),
+            detail,
+        };
+
+        let mut request = Request::new(pb::FetchSourceRequest {
+            job_id: job_id.to_string(),
+            attempt: u32::try_from(attempt).unwrap_or(0),
+            fencing_epoch: u64::try_from(self.fencing_epoch()).unwrap_or(0),
+        });
+        self.stamp(request.metadata_mut())?;
+
+        let mut rpc = self.rpc.clone();
+        let mut chunks = rpc
+            .fetch_source(request)
+            .await
+            .map_err(|e| ClientError::Rpc {
+                what: "fetch_source",
+                source: Box::new(e),
+            })?
+            .into_inner();
+
+        let mut sink = transcodarr_proto::transfer::Sink::create(dest)
+            .map_err(|e| fail(format!("cannot open {} to write: {e}", dest.display())))?;
+
+        loop {
+            // `?` on this is the whole point: an in-stream `Status` leaves here
+            // as an error, where `Ok(None)` falls through to the truncation
+            // check below. They must not share an arm.
+            let chunk = chunks
+                .message()
+                .await
+                .map_err(|e| fail(format!("the source stream failed: {e}")))?;
+
+            let Some(chunk) = chunk else {
+                return Err(fail(format!(
+                    "the stream ended after {} bytes without a final chunk; a transfer that \
+                     stopped is not a transfer that finished",
+                    sink.written()
+                )));
+            };
+
+            if sink.accept(&chunk).map_err(fail)? {
+                return Ok(sink.written());
+            }
+        }
+    }
+
+    /// Push a finished encode back for the server to install.
+    ///
+    /// The server performs the commit ritual itself, so what comes back is the
+    /// *resolution*, not permission to act: a streaming agent has no path to
+    /// the destination and could not install anything if it tried. A refusal
+    /// here is a clean answer with a reason, and the source on the server is
+    /// untouched.
+    ///
+    /// Opening the file is the caller's first failure point on purpose. An
+    /// output that is not there must fail before an RPC starts, rather than
+    /// becoming a transfer that opens and then quietly stops.
+    pub async fn push_output(
+        &self,
+        job_id: &str,
+        attempt: i64,
+        source: &std::path::Path,
+    ) -> Result<pb::PushOutputResponse, ClientError> {
+        let fail = |detail: String| ClientError::Transfer {
+            what: "push_output",
+            job_id: job_id.to_string(),
+            detail,
+        };
+
+        let file = std::fs::File::open(source)
+            .map_err(|e| fail(format!("cannot read {} to push: {e}", source.display())))?;
+
+        let stream = transcodarr_proto::transfer::output_stream(
+            job_id.to_string(),
+            u32::try_from(attempt).unwrap_or(0),
+            file,
+        );
+
+        let mut request = Request::new(stream);
+        self.stamp(request.metadata_mut())?;
+
+        let mut rpc = self.rpc.clone();
+        let response = rpc
+            .push_output(request)
+            .await
+            .map_err(|e| ClientError::Rpc {
+                what: "push_output",
+                source: Box::new(e),
+            })?
+            .into_inner();
+
+        Ok(response)
     }
 
     fn forget(&self, job_id: &str) {
@@ -574,6 +776,10 @@ impl<W: Worker> ConnectClient<W> {
             out: out.clone(),
             epoch: self.epoch.clone(),
             pending: self.pending.clone(),
+            // The same channel the stream runs on. Cloning the client shares
+            // the connection; it does not dial a second one.
+            rpc: client.clone(),
+            agent_id: self.config.agent_id.clone(),
         };
 
         let mut request = Request::new(tokio_stream::wrappers::ReceiverStream::new(out_rx));
@@ -675,26 +881,7 @@ impl<W: Worker> ConnectClient<W> {
 
     /// Put this agent's identity on the stream's request.
     fn stamp(&self, md: &mut tonic::metadata::MetadataMap) -> Result<(), ClientError> {
-        let id = self
-            .config
-            .agent_id
-            .parse()
-            .map_err(|_| ClientError::BadIdentity {
-                field: AGENT_ID_KEY,
-                value: self.config.agent_id.clone(),
-            })?;
-        md.insert(AGENT_ID_KEY, id);
-
-        let epoch = self.fencing_epoch();
-        let epoch = epoch
-            .to_string()
-            .parse()
-            .map_err(|_| ClientError::BadIdentity {
-                field: AGENT_EPOCH_KEY,
-                value: epoch.to_string(),
-            })?;
-        md.insert(AGENT_EPOCH_KEY, epoch);
-        Ok(())
+        stamp_identity(&self.config.agent_id, self.fencing_epoch(), md)
     }
 
     /// Route one inbound message.

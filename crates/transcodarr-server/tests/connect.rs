@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/connect.rs
-// version: 1.3.0
+// version: 1.3.1
 // guid: 1e5b34d8-7f92-4a06-b3c5-82e17ad9604b
 // last-edited: 2026-08-16
 //! The `Connect` stream, over a real gRPC channel.
@@ -671,7 +671,7 @@ async fn a_held_job_streams_its_source_bytes() {
     let epoch = h.register().await;
     // Larger than one chunk and not a multiple of it: the partial final read is
     // where an off-by-one would hide.
-    let body: Vec<u8> = (0..(transcodarr_server::transfer::CHUNK_BYTES + 4321))
+    let body: Vec<u8> = (0..(transcodarr_proto::transfer::CHUNK_BYTES + 4321))
         .map(|i| (i % 251) as u8)
         .collect();
     h.seed_streamable_job("j-fetch", "u1", epoch, &body);
@@ -693,7 +693,7 @@ async fn the_delivered_stream_verifies_against_its_own_signature() {
     h.seed_streamable_job("j-sig", "u1", epoch, &body);
 
     let dest = h.dir.path().join("received.mkv");
-    let mut sink = transcodarr_server::transfer::Sink::create(&dest).unwrap();
+    let mut sink = transcodarr_proto::transfer::Sink::create(&dest).unwrap();
     let mut stream = h
         .fetch("j-sig", epoch as u64, Some(("u1", epoch)))
         .await

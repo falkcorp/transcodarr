@@ -1,7 +1,7 @@
 # file: crates/transcodarr-proto/Cargo.toml
-# version: 1.1.0
+# version: 1.2.0
 # guid: 5a71e0c4-836b-4d92-a017-4f2c95e18b60
-# last-edited: 2026-08-04
+# last-edited: 2026-08-16
 
 [package]
 name = "transcodarr-proto"
@@ -14,11 +14,19 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+# blake3 and tokio arrive with `transfer`, which lives here rather than in the
+# server because both ends of a stream transfer need the *same* `Sink`. A copy
+# in the agent would be a second implementation of the one gate that stands
+# between a truncated transfer and an installed corrupt file.
+blake3 = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
+tracing = { workspace = true }
 transcodarr-core = { path = "../transcodarr-core" }
 
 [build-dependencies]
@@ -27,3 +35,6 @@ transcodarr-core = { path = "../transcodarr-core" }
 prost-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 tonic-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

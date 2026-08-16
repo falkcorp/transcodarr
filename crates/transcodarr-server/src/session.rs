@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.5.2
+// version: 1.5.3
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
@@ -370,7 +370,7 @@ impl pb::agent_service_server::AgentService for AgentSession {
             "serving source bytes"
         );
 
-        Ok(Response::new(crate::transfer::source_stream(
+        Ok(Response::new(transcodarr_proto::transfer::source_stream(
             req.job_id,
             req.attempt,
             std::path::PathBuf::from(file.canonical_path),
@@ -915,7 +915,7 @@ async fn receive(
     job_id: &str,
     attempt: i64,
 ) -> Result<u64, Status> {
-    let mut sink = crate::transfer::Sink::create(temp)
+    let mut sink = transcodarr_proto::transfer::Sink::create(temp)
         .map_err(|e| Status::internal(format!("cannot stage at {}: {e}", temp.display())))?;
 
     let mut chunk = first;
