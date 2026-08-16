@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.5.0 -->
+<!-- version: 3.6.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -148,7 +148,7 @@ or byte ranges.
    test machine. Point it at a file that happens to exist locally — the obvious
    thing to do on a single-machine fixture — and a streaming agent silently
    taking the mount path passes.
-4. **Prove it locally before Windows.** Server and agent both on the Mac, agent
+4. **Prove it locally before Windows.** ← **you are here** Server and agent both on the Mac, agent
    `--transport stream`, a real audio transcode end to end.
 
    **Partly discharged by PR #84.** `stream_transport.rs`'s
@@ -174,72 +174,37 @@ Prefer UNC paths over drive letters in the mount table regardless: a drive
 letter is a per-session alias, a UNC path is not (though it still needs
 credentials in whatever session resolves it).
 
-## Known gap: a stranded ledger row wedges its file permanently
+## ~~Known gap: a stranded ledger row wedges its file permanently~~ Fixed (PR #85)
 
-**This section previously understated the problem and prescribed the wrong
-fix.** It said to add `ritual.recover_all()` to `serve.rs` at startup. That is
-journal-driven, and the thing that wedges a file is the *ledger* row, which can
-exist with no journal record at all (a crash between `grant_op` and the first
-`journal.record`). What was actually found, all of it grep-verified:
+The reconciler's periodic pass now resolves live intents whose job has reached a
+terminal state, and those whose job no longer exists. `resolve_op` was hardened
+to `AND state = 'live'` first, as this section said it had to be.
 
-- `idx_commit_intent_live` is `UNIQUE(final_path) WHERE state = 'live'` —
-  keyed on the **path**, not on `(job_id, attempt)`. A stranded row therefore
-  does not merely leak: it blocks *every* future attempt on that file, a retry
-  under a fresh attempt number, and any brand-new job for the same path. Only
-  `resolve_op` frees a path. The existing test
-  `a_second_live_intent_on_one_path_is_structurally_impossible` proves the
-  mechanism, and its sibling's doc comment names the consequence outright:
-  "once resolved, the path is free again. Otherwise a retry could never
-  install."
-- `CommitIntentRepo::live()` — whose doc comment says "what the reconciler
-  sweeps" — **has no production callers.** Only assertions in
-  `commit_intent.rs` tests and two in `runner.rs`. `reconcile.rs`'s
-  `Reconciler` works on job leases, not on ledger rows. `unknown_intents`
-  (session.rs:241) reads the ledger but never writes it; it reports to the
-  agent. The sweep that comment describes does not exist.
-- **This is not new, and it is not confined to the server.** `LocalRunner` has
-  it too: a crash between `grant_op` (runner.rs:301) and `resolve_op` strands
-  the row, and the `recover_all()` at runner.rs:118 resolves the on-disk
-  journal and never touches the ledger. The push change extended an existing
-  hole to a second caller rather than opening a new one.
+**The predicate came out simpler than this section predicted, and the reason is
+worth keeping.** The plan here was to classify by agent connectivity and lease
+expiry, and to reuse the agent's `recover_one` decision table. Neither was
+needed. The reconciler *already* escalates a live intent on an in-flight job, so
+the only rows it could not see were those whose job had gone terminal — and a
+terminal job's outcome has already been decided and recorded. There is nothing
+left to adjudicate and no file to move, only a row to close.
+
+That holds **only** because `NeedsOperator` is excluded. It is where an
+ambiguous commit lands, and the live intent is what reserves the destination
+while a human looks. Sweeping it would free a path whose on-disk state nobody
+has determined. Do not "simplify" that carve-out away; it is what makes the rest
+safe. Three mutations confirm it: dropping the sweep, dropping the
+`NeedsOperator` guard, and dropping the terminal guard each fail a test.
 
 **A comment asserting that something is swept is weaker evidence than a
-caller.** This one read as reassurance for however long it has been there.
+caller.** `CommitIntentRepo::live()` claimed the reconciler swept it and had no
+production callers for however long it had been there.
 
-### What the fix has to look like
+### Still open: `LocalRunner`
 
-Not a startup call. Startup is the wrong trigger for a condition that arises
-continuously — a startup-only sweep cannot see an agent that dies at minute
-five. It belongs with the reconciler's periodic pass, which already owns the
-lease-expiry vocabulary (`LEASE_SECONDS`, `reconcile.rs`'s grace period).
-
-Who may declare a live row dead, in order of difficulty:
-
-| the row's agent is… | verdict |
-|---|---|
-| connected at the current epoch | never sweepable — someone is mid-replace |
-| connected at a *newer* epoch | sweepable; `require_current_epoch` already recognises exactly this |
-| not connected at all | needs a policy decision, not a derivation — lease expiry plus grace |
-
-The row's `agent_id`/`agent_uid`/`boot_id` name the **streaming agent**, not the
-server that staged for it, so "is this row mine?" is not available to the server
-as a predicate. Do not reach for it.
-
-Two facts settle the implementation, both verified:
-
-1. **`resolve_op` is `WHERE id = ?1`, unguarded** (commit_intent.rs:219),
-   unlike `advance_op` one function above it, which is
-   `WHERE id = ?1 AND state = 'live'`. Harden it before writing any sweep, or a
-   sweeper and a legitimately-finishing ritual both succeed and the sweeper
-   frees a path that is mid-replace — precisely what the index exists to
-   prevent. The asymmetry between the two looks unintentional.
-2. **A ledger row carries every field of an `IntentRecord`** — job_id, attempt,
-   agent_uid, boot_id, fencing_epoch, temp_path, final_path, trash_path,
-   expected_content_sig, phase. So the sweep can synthesise an `IntentRecord`
-   and reuse `recover_one`'s decision table verbatim. Do not write a second
-   one: two copies of a fence are two fences that can drift.
-
-Do this before running stream mode against anything that matters.
+`admin run` has the same hole. It grants intents directly (runner.rs:301) and a
+crash before `resolve_op` strands one, and it runs no orchestrator so no sweep
+passes over it. Lower stakes — it is the single-machine path, and there is no
+fleet to contend for the destination — but it is real.
 
 ## Traps still standing
 
