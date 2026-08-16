@@ -1,7 +1,7 @@
 # file: crates/transcodarr-server/Cargo.toml
-# version: 1.2.0
+# version: 1.3.0
 # guid: 3f6d1b84-52e0-4c97-a83b-9d16e40c7a25
-# last-edited: 2026-08-04
+# last-edited: 2026-08-16
 
 [package]
 name = "transcodarr-server"
@@ -31,6 +31,10 @@ transcodarr-store = { path = "../transcodarr-store" }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+# The push tests compute the signature a real agent would send. Recomputing it
+# with the same library the receiver uses is the point: a test that hard-coded
+# a digest would pass while the two sides disagreed.
+blake3 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
 tokio-stream = { workspace = true, features = ["net"] }

@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.1.0 -->
+<!-- version: 3.2.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -86,12 +86,22 @@ or byte ranges.
    `agent_id`/`fencing_epoch` in place, so a failed job still names its last
    holder, and only a new `boot_id` bumps an epoch. Without it the agent that
    just failed a job could pull its source forever.
-2. **Server-side install for `push_output`.** Receive into a staging path with
-   `transfer::Sink`, then follow `runner.rs:281–350` *literally*, including the
-   ordering the comments there defend: `CommitIntentRepo::grant_op` **before**
-   the ritual touches anything, `resolve_op` after whatever happened, the
-   `trash_entry` row **last**. `AgentSession` will need a `WorkArea` +
-   `CommitRitual` (constructor change; 3 call sites).
+2. ~~**Server-side install for `push_output`.**~~ **Done** (PR #82). It stages
+   with `transfer::Sink` and runs the commit ritual server-side, reusing
+   `judge_commit` and the `resolve_op` path the mount agent already drives.
+
+   **The instruction that used to be here was wrong, and is worth remembering
+   as a class of error.** It said to follow `runner.rs:281–350` *literally*,
+   including `grant_op` before the ritual. That would have collided on the
+   primary key: the orchestrator already grants the intent at dispatch
+   (`orchestrator.rs:410–419`, same `{job}:{attempt}` id), and `runner.rs`
+   grants only because it is `LocalRunner` — "no dispatcher, no agents, no
+   gRPC" — and nothing dispatched to it. One grep at the other call site
+   answered in a minute what an argument from first principles would have got
+   wrong. **Read the existing call sites before mirroring a ritual.**
+
+   No constructor change was needed either: the work area is opened per library
+   from `library.work_dir`, exactly as `run_library` does.
 3. **The agent-side stream path** in `worker.rs`. Under `Stream`, fetch instead
    of reading `source_path`, and **do not** run the local ritual
    (`commit_blocking`, worker.rs:373).
@@ -120,6 +130,21 @@ Prefer UNC paths over drive letters in the mount table regardless: a drive
 letter is a per-session alias, a UNC path is not (though it still needs
 credentials in whatever session resolves it).
 
+## Known gap, deliberately left
+
+**Nothing recovers the server's own journal.** `LocalRunner` calls
+`ritual.recover_all()` at the top of `run_library`, so an install interrupted by
+a crash is resolved on the next run. The server now performs installs too, from
+a `WorkArea` under `library.work_dir` keyed by its own `agent_uid`/`boot_id`,
+and no equivalent sweep runs at startup — a server killed mid-ritual leaves an
+`IntentRecord` nobody reads. The ledger row stays `live`, so the destination
+stays reserved and nothing double-installs; the hole is that it stays reserved
+*forever* rather than being resolved.
+
+The fix is a `recover_all()` per enabled library in `serve.rs`, before the
+listener opens. It was left out to keep the push change reviewable, not because
+it is optional. Do it before running stream mode against anything that matters.
+
 ## Traps still standing
 
 - Turing NVDEC cannot decode AV1 (exit 69, ~1 KB truncated) or 10-bit H.264
@@ -142,6 +167,18 @@ credentials in whatever session resolves it).
   `fetch_source`, where every attempt reads the same source path, so a mislabeled
   chunk still carries correct bytes. **Not** harmless for `push_output`, which
   will key staging and the intent grant on `(job_id, attempt)` — check it there.
+- **`judge_commit` is not a fence on its own.** It compares the caller's epoch
+  against the *intent*, which is enough on `Connect` because that epoch arrived
+  on a stream the server authenticated. On `FetchSource`/`PushOutput` the epoch
+  is asserted by the caller in metadata, and a superseded instance can present
+  the very epoch its own intent was granted under — passing every check that
+  only compares the two. Use `require_current_epoch`, which asks the registry.
+  A test caught this: the stale-epoch push installed.
+- **A freshly created job is on attempt `0`, not `1`.** Seeding a test fixture
+  at attempt 1 makes `push_output`'s attempt gate refuse everything, and every
+  refusal test then passes while proving nothing about the gate it names. Nine
+  of them did. Mutation-test refusal paths; a green refusal test is the easiest
+  kind to get for free.
 - The `FakeServer` in `connect_client.rs` refuses to serve bytes on purpose.
   Do not weaken it to make a streaming test pass — a fake that returned an empty
   stream would let a streaming test pass while moving no bytes.
