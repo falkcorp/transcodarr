@@ -1,7 +1,7 @@
 # file: buf.yaml
-# version: 1.0.0
+# version: 1.1.0
 # guid: 7e1c93a4-58d0-4b62-9fa7-2c48e01d6b35
-# last-edited: 2026-08-04
+# last-edited: 2026-08-16
 
 # buf guards the wire contract; it is deliberately NOT in the build path.
 #
@@ -49,6 +49,26 @@ lint:
         # it. Renaming would be conventional; it would not be safer.
         - ENUM_VALUE_PREFIX
         - ENUM_ZERO_VALUE_SUFFIX
+
+        # `FileChunk` is the response of `FetchSource` and the request of
+        # `PushOutput`. That is one message on purpose: the two RPCs move the
+        # same thing -- a slice of a file, with its offset and a whole-file
+        # signature on the last one -- in opposite directions, and a single
+        # `transfer::Sink` verifies both ends.
+        #
+        # The rule's concern is real but backwards here. Splitting into
+        # `SourceChunk` and `OutputChunk` would produce two definitions that
+        # must stay byte-identical, which is a second implementation free to
+        # drift from the first -- the failure this codebase argues against
+        # everywhere else, and the one a shared `Sink` exists to prevent. The
+        # day the two directions genuinely need different fields is the day to
+        # split them; until then the coupling is the invariant, not an
+        # oversight.
+        #
+        # Latent since the streaming RPCs landed: this job runs only when a
+        # .proto file changes, so it reported `skipping` on the two pull
+        # requests that added their server-side halves.
+        - RPC_REQUEST_RESPONSE_UNIQUE
 
 breaking:
     # Every breaking rule stays on. This is the half of buf that earns its

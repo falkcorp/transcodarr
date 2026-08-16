@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.3.0 -->
+<!-- version: 3.4.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -102,14 +102,57 @@ or byte ranges.
 
    No constructor change was needed either: the work area is opened per library
    from `library.work_dir`, exactly as `run_library` does.
-3. **The agent-side stream path** in `worker.rs`. Under `Stream`, fetch instead
-   of reading `source_path`, and **do not** run the local ritual
-   (`commit_blocking`, worker.rs:373).
-   **The trap:** the intent journal exists to recover half-finished *installs*,
-   and a streaming agent never installs. Reusing mount-mode journalling as-is
-   writes `IntentRecord`s that can never resolve and hands the server
-   `live_intents` for work it must not fence on. Decide what `live_intents()`
-   returns under `Stream` — plausibly empty — and write down why.
+3. **The agent-side stream path.** Half done (PR #83) — and the half that was
+   done was not the half this entry described.
+
+   **What this entry got wrong:** it said "under `Stream`, fetch instead of
+   reading `source_path`", which assumes `source_path` and `argv` are usable by
+   a streaming agent. They are not, and were not for a mount agent on another
+   host either. `argv` is specified as "fully translated, agent-local"
+   (`agent.proto`) and "translated per candidate agent" (`doc:2220`), and
+   **nothing translated it** — the orchestrator shipped `file.canonical_path`
+   and the server's own work dir verbatim. Same-host runs masked it. There was
+   no coherent place to fetch *to* until the assignment itself became
+   agent-local. That is PR #83:
+   `core::plan::agent_job_paths` + `Capability.workarea_path`.
+
+   **Do not reintroduce substitution tokens in `argv`.** `{{input}}` is the
+   obvious design and it is ruled out twice over: `JobStarted` carries "echoed
+   argv, which must equal what was sent" (`doc:889`), and
+   `job_attempt.argv_json` is persisted so an operator can paste it into a shell
+   on that agent and reproduce byte-for-byte (`doc:2058`, `:2358`). A
+   placeholder only the agent can expand breaks both.
+
+   **`live_intents()` under `Stream` needs no code and no branch.** It is empty
+   *structurally*: `CommitRitual::commit` is the only production writer of the
+   journal (`commit.rs:270/297/322` — `:536` is a test), and a streaming agent
+   never runs the ritual. That is the "write down why" this entry asked for.
+
+   ### What is left of step 3
+
+   In `worker.rs::execute`, under `Stream`:
+
+   - **Skip `ensure_same_device`** (worker.rs:161) and **`SourceGuard::observe`**
+     (worker.rs:171). Both stat `final_path`, which the agent cannot see. The
+     server builds the guard from the stored file row instead — already done in
+     `push_output`.
+   - **Fetch to `a.source_path`** before encoding. It is now an agent-local path
+     the server chose, so `argv` and `judge()` both already point at it.
+   - **Push instead of `commit_blocking`** (worker.rs:242). Report whatever
+     resolution the server returns.
+
+   **The plumbing is the actual work, and it does not exist yet.** `Link`
+   (client.rs:263–322) only sends messages on the `Connect` stream; there is no
+   fetch or push method, and `stamp()` (client.rs:677) is private and called
+   only at the `connect()` call site (client.rs:580). `FetchSource` and
+   `PushOutput` are separate RPCs needing an `AgentServiceClient<Channel>`
+   plumbed into `LocalWorker` along with identity to stamp. Budget for that, not
+   for a two-line branch.
+
+   **Traps that still apply here:** an unstamped fetch gets an opaque
+   `Unauthenticated`; an in-stream error is fatal, not end-of-stream
+   (`transfer.rs:63`), and a reader that treats it as termination turns a
+   missing source into a zero-byte fetch whose blake3 verifies fine.
 4. **Prove it locally before Windows.** Server and agent both on the Mac, agent
    `--transport stream`, a real audio transcode end to end. None of that needs
    the GPU node. If it works locally, Windows is deployment; if it does not, you
