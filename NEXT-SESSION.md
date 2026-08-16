@@ -1,11 +1,11 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.0.1 -->
+<!-- version: 3.0.2 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-12 -->
 
 # Goal: a real transcode on the GPU node, both transports, audio and video
 
-**Still not achieved.** No transcode has run on U1 by either method. What
+**Still not achieved.** No transcode has run on the GPU node (`windows-rtx2070`, 172.16.3.22) by either method. What
 changed on 2026-08-12 is that two of the three blockers are gone, and the third
 is now precisely scoped rather than mysterious.
 
@@ -41,7 +41,7 @@ interleaving misses both.
 For an intermittent fault, measure a *rate*, and sample a live hung process
 rather than reasoning about it.
 
-### The agent runs on Windows — cross-compiled and executed on U1
+### The agent runs on Windows — cross-compiled and executed on the GPU node
 
 `x86_64-pc-windows-gnu` builds clean after `brew install mingw-w64`. `ring` is
 in the tree (via `tonic`'s `tls` → `rustls`) and cross-built without trouble, so
@@ -101,7 +101,7 @@ or byte ranges.
    `--transport stream`, a real audio transcode end to end. None of that needs
    the GPU node. If it works locally, Windows is deployment; if it does not, you
    debug byte plumbing without mingw, NVENC and logon sessions confounding it.
-5. **Then U1:** stream-mode audio, then video with `hevc_nvenc`.
+5. **Then `windows-rtx2070`:** stream-mode audio, then video with `hevc_nvenc`.
 6. **Mount mode last** — see below, it needs hands on the box.
 
 ## Mount mode needs the owner at the console
@@ -125,7 +125,7 @@ credentials in whatever session resolves it).
 - **Probe by trial, never by asking ffmpeg what it lists.** Confirmed again
   today: that ffmpeg lists `av1_nvenc` and the hardware cannot do it.
 - That ffmpeg build has **no libx264** — no software video fallback on the box.
-- ICMP is filtered on U1. `ping` failing proves nothing; test port 22.
+- ICMP is filtered on `windows-rtx2070`. `ping` failing proves nothing; test port 22.
 - The `FakeServer` in `connect_client.rs` refuses to serve bytes on purpose.
   Do not weaken it to make a streaming test pass — a fake that returned an empty
   stream would let a streaming test pass while moving no bytes.
