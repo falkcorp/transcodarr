@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/tests/connect.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 1e5b34d8-7f92-4a06-b3c5-82e17ad9604b
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! The `Connect` stream, over a real gRPC channel.
 //!
 //! Same shape as `register.rs`: a `tonic` server on a loopback port, dialled
@@ -35,7 +35,7 @@ struct Harness {
     intents: CommitIntentRepo,
     writer: Arc<Writer>,
     pool: ReadPool,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 async fn harness() -> Harness {
@@ -49,6 +49,7 @@ async fn harness() -> Harness {
         CommitIntentRepo::new(pool.clone()),
         JobRepo::new(pool.clone()),
         LibraryRepo::new(pool.clone()),
+        FileRepo::new(pool.clone()),
         writer.clone(),
         None,
     );
@@ -80,20 +81,29 @@ async fn harness() -> Harness {
         intents: CommitIntentRepo::new(pool.clone()),
         writer,
         pool,
-        _dir: dir,
+        dir,
     }
 }
 
 impl Harness {
     /// Register `u1`, returning the epoch it was issued.
     async fn register(&mut self) -> i64 {
+        self.register_as("u1", "uid-1", "boot-a").await
+    }
+
+    /// Register any agent. A second one is needed to prove that bytes follow
+    /// the job's holder — and `job.agent_id` is a foreign key, so the other
+    /// agent has to genuinely exist rather than merely be named.
+    /// `boot_id` is the only thing that bumps an epoch, so a second call with a
+    /// fresh one is how a test manufactures a genuinely superseded instance.
+    async fn register_as(&mut self, agent_id: &str, agent_uid: &str, boot_id: &str) -> i64 {
         let res = self
             .client
             .register(pb::RegisterRequest {
                 identity: Some(pb::AgentIdentity {
-                    agent_id: "u1".into(),
-                    agent_uid: "uid-1".into(),
-                    boot_id: "boot-a".into(),
+                    agent_id: agent_id.into(),
+                    agent_uid: agent_uid.into(),
+                    boot_id: boot_id.into(),
                     agent_version: "1.0.0".into(),
                     proto_version: transcodarr_proto::PROTO_VERSION,
                 }),
@@ -233,6 +243,132 @@ impl Harness {
                     .unwrap();
             }
         }
+    }
+
+    /// Seed a job whose source is a real file, held by `agent_id` at `epoch`.
+    ///
+    /// `seed_job` points the row at `/mnt/tv/...`, which is fine for every test
+    /// that never opens the file. Streaming reads the bytes, so the row has to
+    /// name something that exists — otherwise the handler fails on the open and
+    /// the test proves nothing about fencing.
+    fn seed_streamable_job(&self, job_id: &str, agent_id: &str, epoch: i64, body: &[u8]) {
+        let source = self.dir.path().join(format!("{job_id}.mkv"));
+        std::fs::write(&source, body).unwrap();
+
+        self.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                LibraryRepo::upsert_op(LibraryRecord {
+                    id: "tv".into(),
+                    name: "tv".into(),
+                    root_path: "/mnt/tv".into(),
+                    work_dir: "/mnt/tv/work".into(),
+                    trash_dir: "/mnt/tv/trash".into(),
+                    exclude_globs_json: "[]".into(),
+                    enabled: true,
+                    scan_parallelism: 4,
+                    priority: 0,
+                    min_mtime_age_s: 300,
+                }),
+            )
+            .unwrap();
+
+        let file_id = self
+            .writer
+            .submit_blocking(
+                WriteLane::Normal,
+                FileRepo::upsert_op(FileUpsert {
+                    library_id: "tv".into(),
+                    canonical_path: source.to_string_lossy().to_string(),
+                    path_hash: format!("h-{job_id}"),
+                    size_bytes: body.len() as i64,
+                    mtime_unix: 10,
+                    mtime_ns: 0,
+                    inode: Some(1),
+                    dev: Some(1),
+                    nlink: 1,
+                    scan_generation: 1,
+                }),
+            )
+            .unwrap()
+            .last_id
+            .unwrap();
+
+        self.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                JobRepo::create_op(NewJob {
+                    id: job_id.into(),
+                    file_id,
+                    library_id: "tv".into(),
+                    class: JobClass::Audio,
+                    size_bucket: SizeBucket::Small,
+                    requirements_json: "[]".into(),
+                    requirements_bucket_key: "audio".into(),
+                    expected_content_sig: "sig".into(),
+                    rules_version: "1".into(),
+                    priority: 0,
+                    parent_job_id: None,
+                }),
+            )
+            .unwrap();
+
+        // Pending -> Eligible -> Assigned -> Running, the real path. A job an
+        // agent is fetching source for is one it has been handed.
+        self.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                JobRepo::transition_op(
+                    job_id.into(),
+                    JobState::Pending,
+                    JobState::Eligible,
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        self.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                JobRepo::assign_op(job_id.into(), agent_id.into(), epoch),
+            )
+            .unwrap();
+        self.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                JobRepo::transition_op(
+                    job_id.into(),
+                    JobState::Assigned,
+                    JobState::Running,
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+    }
+
+    /// Call `FetchSource`, optionally stamping the identity metadata.
+    ///
+    /// `identity: None` is the unidentified caller, which must be refused —
+    /// `FetchSourceRequest` carries no `agent_id`, deliberately, so metadata is
+    /// the only thing that says who is asking.
+    async fn fetch(
+        &mut self,
+        job_id: &str,
+        fencing_epoch: u64,
+        identity: Option<(&str, i64)>,
+    ) -> Result<tonic::Response<Streaming<pb::FileChunk>>, tonic::Status> {
+        let mut req = Request::new(pb::FetchSourceRequest {
+            job_id: job_id.into(),
+            attempt: 1,
+            fencing_epoch,
+        });
+        if let Some((id, ep)) = identity {
+            req.metadata_mut().insert("x-agent-id", id.parse().unwrap());
+            req.metadata_mut()
+                .insert("x-agent-epoch", ep.to_string().parse().unwrap());
+        }
+        self.client.fetch_source(req).await
     }
 
     /// Grant a live commit intent for a seeded job.
@@ -507,4 +643,150 @@ async fn a_closed_stream_marks_the_agent_offline_without_touching_its_epoch() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(offline, "a closed stream should mark the agent offline");
+}
+
+// ------------------------------------------------------------ FetchSource --
+
+/// Collect a whole fetch, so a refusal and an empty-but-successful stream
+/// cannot be confused.
+///
+/// A handler that returned `Ok` with no chunks would satisfy any assertion
+/// phrased as "this must not succeed in delivering bytes". Folding the call
+/// error and the in-stream error into one `Result` means the refusal tests can
+/// demand an actual error, which an empty stream does not produce.
+async fn collect(
+    res: Result<tonic::Response<Streaming<pb::FileChunk>>, tonic::Status>,
+) -> Result<Vec<u8>, tonic::Status> {
+    let mut stream = res?.into_inner();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.message().await? {
+        out.extend_from_slice(&chunk.data);
+    }
+    Ok(out)
+}
+
+#[tokio::test]
+async fn a_held_job_streams_its_source_bytes() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    // Larger than one chunk and not a multiple of it: the partial final read is
+    // where an off-by-one would hide.
+    let body: Vec<u8> = (0..(transcodarr_server::transfer::CHUNK_BYTES + 4321))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    h.seed_streamable_job("j-fetch", "u1", epoch, &body);
+
+    let got = collect(h.fetch("j-fetch", epoch as u64, Some(("u1", epoch))).await)
+        .await
+        .expect("a held job must serve its source");
+
+    assert_eq!(got, body, "the bytes delivered must be the bytes on disk");
+}
+
+/// The signature is the gate that matters, so prove it is actually checked
+/// end to end rather than trusting that `transfer` computed one.
+#[tokio::test]
+async fn the_delivered_stream_verifies_against_its_own_signature() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    let body: Vec<u8> = (0..40_000).map(|i| (i % 97) as u8).collect();
+    h.seed_streamable_job("j-sig", "u1", epoch, &body);
+
+    let dest = h.dir.path().join("received.mkv");
+    let mut sink = transcodarr_server::transfer::Sink::create(&dest).unwrap();
+    let mut stream = h
+        .fetch("j-sig", epoch as u64, Some(("u1", epoch)))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut done = false;
+    while let Some(chunk) = stream.message().await.unwrap() {
+        done = sink.accept(&chunk).expect("every chunk must be acceptable");
+    }
+
+    assert!(done, "the stream must end with an explicit last chunk");
+    assert_eq!(std::fs::read(&dest).unwrap(), body);
+}
+
+#[tokio::test]
+async fn a_stale_epoch_is_served_no_bytes() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    h.seed_streamable_job("j-stale", "u1", epoch, b"secret bytes");
+
+    // A restart under a new boot_id supersedes the instance holding `epoch`.
+    // The old instance stamps and claims that same stale epoch consistently —
+    // which is the realistic shape, and the one that actually exercises the
+    // check against the registry rather than the two claims against each other.
+    let fresh = h.register_as("u1", "uid-1", "boot-restarted").await;
+    assert_ne!(fresh, epoch, "a new boot_id must take a new epoch");
+
+    let err = collect(h.fetch("j-stale", epoch as u64, Some(("u1", epoch))).await)
+        .await
+        .expect_err("a fenced-out agent must not pull bytes for work it lost");
+
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+}
+
+/// The two epochs come from one place on a real client, so a disagreement is a
+/// confused caller — and picking one to believe is how a fence lands on the
+/// wrong instance.
+#[tokio::test]
+async fn a_fetch_whose_two_epochs_disagree_is_refused() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    h.seed_streamable_job("j-mixed", "u1", epoch, b"mixed signals");
+
+    let err = collect(
+        h.fetch("j-mixed", (epoch + 1) as u64, Some(("u1", epoch)))
+            .await,
+    )
+    .await
+    .expect_err("a request that contradicts its own metadata must be refused");
+
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+}
+
+#[tokio::test]
+async fn an_agent_that_does_not_hold_the_job_is_served_no_bytes() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    // Held by somebody else entirely.
+    let other = h.register_as("u2", "uid-2", "boot-b").await;
+    h.seed_streamable_job("j-other", "u2", other, b"not yours");
+
+    let err = collect(h.fetch("j-other", epoch as u64, Some(("u1", epoch))).await)
+        .await
+        .expect_err("bytes must follow the job's holder, not the caller's claim");
+
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err}");
+}
+
+#[tokio::test]
+async fn a_fetch_without_identity_metadata_is_refused() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    h.seed_streamable_job("j-anon", "u1", epoch, b"anonymous");
+
+    let err = collect(h.fetch("j-anon", epoch as u64, None).await)
+        .await
+        .expect_err("an unidentified caller must not be served");
+
+    assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
+}
+
+#[tokio::test]
+async fn a_fetch_for_an_unknown_job_is_refused() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+
+    let err = collect(
+        h.fetch("no-such-job", epoch as u64, Some(("u1", epoch)))
+            .await,
+    )
+    .await
+    .expect_err("an unknown job has no source to serve");
+
+    assert_eq!(err.code(), tonic::Code::NotFound, "{err}");
 }
