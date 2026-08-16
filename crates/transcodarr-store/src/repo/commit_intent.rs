@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/repo/commit_intent.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 6e10a4d3-92c7-4b58-81f0-3a5d76e29b41
-// last-edited: 2026-08-04
+// last-edited: 2026-08-16
 //! The server-side commit ledger.
 //!
 //! The agent's `IntentJournal` survives a crash of the *agent*. This table
@@ -158,8 +158,16 @@ impl CommitIntentRepo {
 
     /// Every intent still live.
     ///
-    /// What the reconciler sweeps: a live intent whose agent has gone away is
-    /// the ambiguity the whole ledger exists to make visible.
+    /// What `Orchestrator::sweep_stranded_intents` reads each tick. It resolves
+    /// the ones whose job has reached a terminal state other than
+    /// `NeedsOperator` — nothing will ever come back for those, and until one is
+    /// resolved its `final_path` is reserved against *every* future job for that
+    /// file, not merely against a retry of its own.
+    ///
+    /// This comment previously claimed the reconciler swept this list when
+    /// nothing in production called it at all. A comment asserting that
+    /// something is swept is weaker evidence than a caller; check for the
+    /// caller.
     pub fn live(&self) -> Result<Vec<CommitIntent>, StoreError> {
         let c = self.pool.get()?;
         let mut stmt = c.prepare(&format!(
@@ -216,6 +224,17 @@ impl CommitIntentRepo {
     ///
     /// Rows are never deleted here: they are the audit trail for what happened
     /// to a file, retained long after the job itself is pruned.
+    ///
+    /// **Guarded on `state = 'live'`, like [`Self::advance_op`] above.** Two
+    /// things depend on it. A reconciler sweep and a ritual that is legitimately
+    /// finishing can both reach the same row, and without the guard both
+    /// succeed — the sweeper frees a path that is mid-replace, which is exactly
+    /// what `idx_commit_intent_live` exists to prevent. And several callers are
+    /// best-effort tidy-ups (`release_intent`, `requeue`) that may fire against
+    /// an already-resolved row; unguarded, a later "abandoned" overwrites an
+    /// earlier "installed" and the audit trail then says the opposite of what
+    /// happened. Returns zero rows affected in both cases, which is the honest
+    /// answer: there was no live intent to resolve.
     pub fn resolve_op(id: String, resolution: String) -> WriteOp {
         WriteOp::new(format!("commit_intent.resolve:{id}"), move |c| {
             let now = now_unix() * 1000;
@@ -223,7 +242,7 @@ impl CommitIntentRepo {
                 "UPDATE commit_intent
                  SET state = 'resolved', resolution = ?2, resolved_unix_ms = ?3,
                      updated_unix_ms = ?3
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND state = 'live'",
                 params![id, resolution, now],
             )? as u64)
         })
@@ -374,6 +393,40 @@ mod tests {
         let ack = f.write(CommitIntentRepo::advance_op("i1".into(), "Retired".into()));
         assert_eq!(ack.rows, 0, "no live row to advance");
         assert_eq!(repo.get("i1").unwrap().unwrap().phase, "Granted");
+    }
+
+    /// The same rule as advancing, for the same reason: a resolved intent is
+    /// history.
+    ///
+    /// Several callers resolve best-effort and can fire against a row that is
+    /// already done — `release_intent` when a job fails after its push already
+    /// installed, `requeue` on a job that resolved by another path. Unguarded,
+    /// the later "abandoned" overwrites the earlier "installed" and the audit
+    /// trail then records the opposite of what happened to the file.
+    ///
+    /// The sharper case is concurrency: a sweep and a legitimately finishing
+    /// ritual reaching one row. Both would succeed, and the sweeper would free
+    /// a path that is mid-replace — precisely what `idx_commit_intent_live`
+    /// exists to prevent.
+    #[test]
+    fn a_resolved_intent_cannot_be_resolved_again() {
+        let (f, repo) = seeded();
+        f.write(CommitIntentRepo::grant_op(intent("i1", "/mnt/tv/a.mkv")));
+        f.write(CommitIntentRepo::resolve_op(
+            "i1".into(),
+            "installed".into(),
+        ));
+
+        let ack = f.write(CommitIntentRepo::resolve_op(
+            "i1".into(),
+            "abandoned".into(),
+        ));
+        assert_eq!(ack.rows, 0, "no live row to resolve");
+        assert_eq!(
+            repo.get("i1").unwrap().unwrap().resolution.as_deref(),
+            Some("installed"),
+            "the first resolution is what happened; the second must not rewrite it"
+        );
     }
 
     /// A live intent whose agent has gone away is the ambiguity the ledger

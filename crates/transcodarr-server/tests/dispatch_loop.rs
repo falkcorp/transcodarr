@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/dispatch_loop.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: b2d704e9-5c81-4a36-97f0-1e648d3c5b02
 // last-edited: 2026-08-16
 //! The loop under conditions the single-job proof cannot reach.
@@ -516,4 +516,182 @@ async fn a_streaming_agent_with_no_work_area_is_not_dispatched_to() {
         JobState::Assigned,
         "the job must stay queued for an agent that can run it"
     );
+}
+
+// ------------------------------------------------- sweeping stranded intents
+
+use transcodarr_store::repo::{CommitIntent, CommitIntentRepo, NewIntent};
+
+impl Harness {
+    /// Reserve `path` for a job, the way dispatch does.
+    fn grant_intent(&self, job_id: &str, path: &str) -> u64 {
+        self.runtime
+            .writer()
+            .submit_blocking(
+                WriteLane::Commit,
+                CommitIntentRepo::grant_op(NewIntent {
+                    id: format!("{job_id}:0"),
+                    job_id: job_id.into(),
+                    attempt: 0,
+                    agent_id: "a1".into(),
+                    agent_uid: "uid-1".into(),
+                    fencing_epoch: 1,
+                    source_path: path.into(),
+                    temp_path: format!("{path}.partial"),
+                    final_path: path.into(),
+                    expected_content_sig: "sig".into(),
+                }),
+            )
+            .expect("the path must be free to grant against")
+            .rows
+    }
+
+    /// The canonical path [`Self::add_job`] gave this job's file.
+    fn path_of(&self, job_id: &str) -> String {
+        self._dir
+            .path()
+            .join(format!("lib/{job_id}.mkv"))
+            .display()
+            .to_string()
+    }
+
+    fn intent(&self, id: &str) -> CommitIntent {
+        CommitIntentRepo::new(self.runtime.pool().clone())
+            .get(id)
+            .unwrap()
+            .expect("the intent row should exist")
+    }
+
+    /// Walk a job to `to`, using only transitions the state machine allows.
+    fn walk_to(&self, job_id: &str, path: &[JobState]) {
+        let mut from = self.state(job_id);
+        for &to in path {
+            self.runtime
+                .writer()
+                .submit_blocking(
+                    WriteLane::Normal,
+                    JobRepo::transition_op(job_id.to_string(), from, to, None, None),
+                )
+                .unwrap();
+            from = to;
+        }
+    }
+}
+
+/// The wedge this sweep exists for. `idx_commit_intent_live` is keyed on the
+/// **path**, so a row nothing will ever resolve does not merely leak — it
+/// blocks every future attempt on that file and every new job for it.
+#[tokio::test]
+async fn a_live_intent_on_a_terminal_job_is_swept() {
+    let h = Harness::new();
+    h.add_job("j1");
+    let path = h.path_of("j1");
+    h.grant_intent("j1", &path);
+    // Cancellation reaches a terminal state from anywhere, which is all this
+    // test needs; the predicate is `is_terminal`, not this particular route.
+    h.walk_to("j1", &[JobState::Cancelled]);
+
+    let orchestrator = h.orchestrator(AgentLimits::flat(4, 1));
+    let outcome = orchestrator.tick().await.unwrap();
+
+    assert_eq!(outcome.swept_intents, vec!["j1:0".to_string()]);
+    let intent = h.intent("j1:0");
+    assert_eq!(intent.state, "resolved");
+    assert_eq!(
+        intent.resolution.as_deref(),
+        Some("swept"),
+        "the audit trail must say the reconciler freed this, not that a commit did"
+    );
+}
+
+/// The whole point, stated as the behaviour rather than the row: after the
+/// sweep the destination can be reserved again. Before it, this second grant
+/// is refused by the unique index and the file is unprocessable forever.
+#[tokio::test]
+async fn sweeping_frees_the_destination_for_a_later_job() {
+    let h = Harness::new();
+    h.add_job("j1");
+    let path = h.path_of("j1");
+    h.grant_intent("j1", &path);
+    h.walk_to("j1", &[JobState::Cancelled]);
+
+    // Same path, different job: exactly what a re-scan produces, and what the
+    // stranded row blocks.
+    h.add_job("j2");
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.grant_intent("j2", &path)))
+            .is_err(),
+        "a second live intent on one path must be refused while the first stands"
+    );
+
+    let orchestrator = h.orchestrator(AgentLimits::flat(4, 1));
+    orchestrator.tick().await.unwrap();
+
+    assert_eq!(
+        h.grant_intent("j2", &path),
+        1,
+        "once swept, the path is free and the next job can be placed against it"
+    );
+}
+
+/// `NeedsOperator` is where an ambiguous commit lands, and the live intent is
+/// what holds the destination reserved while a human looks. Sweeping it would
+/// free a path whose on-disk state nobody has determined, and the next job for
+/// that file would install over it.
+#[tokio::test]
+async fn an_intent_held_for_an_operator_is_never_swept() {
+    let h = Harness::new();
+    h.add_job("j1");
+    let path = h.path_of("j1");
+    h.grant_intent("j1", &path);
+    h.walk_to(
+        "j1",
+        &[
+            JobState::Eligible,
+            JobState::Assigned,
+            JobState::Running,
+            JobState::Verifying,
+            JobState::Committing,
+            JobState::NeedsOperator,
+        ],
+    );
+
+    let orchestrator = h.orchestrator(AgentLimits::flat(4, 1));
+    let outcome = orchestrator.tick().await.unwrap();
+
+    assert!(
+        outcome.swept_intents.is_empty(),
+        "an ambiguous commit must keep its destination reserved"
+    );
+    assert_eq!(h.intent("j1:0").state, "live");
+}
+
+/// A job still in flight may have an agent between the two renames right now.
+/// The reconciler escalates that case; it must never be swept out from under
+/// the agent doing it.
+///
+/// Driven through real dispatch rather than by hand. A job walked to `Running`
+/// with no agent attached is not "in flight" at all — it is a *lost* job, and
+/// the reconciler requeues it, which releases the intent by an entirely
+/// different mechanism. The test would then pass for the wrong reason while
+/// proving nothing about the sweep.
+#[tokio::test]
+async fn a_live_intent_on_a_job_still_in_flight_is_not_swept() {
+    let h = Harness::new();
+    let _rx = h.add_agent("a1");
+    h.add_job("j1");
+
+    let orchestrator = h.orchestrator(AgentLimits::flat(4, 1));
+    // Dispatch places the job on the connected agent and grants its intent.
+    orchestrator.tick().await.unwrap();
+    assert_eq!(h.state("j1"), JobState::Assigned);
+    assert_eq!(h.intent("j1:0").state, "live");
+
+    let outcome = orchestrator.tick().await.unwrap();
+
+    assert!(
+        outcome.swept_intents.is_empty(),
+        "the agent is connected and holds a current lease; nothing here is stranded"
+    );
+    assert_eq!(h.intent("j1:0").state, "live");
 }

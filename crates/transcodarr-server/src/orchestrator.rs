@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/orchestrator.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 74b2e9c0-3a58-4f16-9d47-0e85b3c21fa6
 // last-edited: 2026-08-16
 //! The loop: queue in, assignments out, and the ledger kept honest.
@@ -95,6 +95,12 @@ pub struct TickOutcome {
     pub requeued: Vec<String>,
     /// Jobs the reconciler could not decide.
     pub escalated: Vec<String>,
+    /// Commit intents freed because nothing would ever resolve them.
+    ///
+    /// Reported rather than merely logged: each one was a destination no job
+    /// could be placed against, so a tick that sweeps any is a tick that
+    /// unblocked files.
+    pub swept_intents: Vec<String>,
 }
 
 /// Runs the dispatch loop.
@@ -605,7 +611,91 @@ impl Orchestrator {
                 }
             }
         }
+
+        self.sweep_stranded_intents(outcome);
         Ok(())
+    }
+
+    /// Free destinations reserved by intents nothing will ever resolve.
+    ///
+    /// ## What wedges, and why it is worse than a leak
+    ///
+    /// `idx_commit_intent_live` is `UNIQUE(final_path) WHERE state = 'live'` —
+    /// keyed on the **path**, not on `(job_id, attempt)`. A row left live
+    /// therefore does not merely leak: it blocks every future attempt on that
+    /// file, a retry under a fresh attempt number, and any brand-new job for
+    /// the same path. Only a resolve frees it, and until this existed nothing
+    /// in production ever called [`CommitIntentRepo::live`] despite its doc
+    /// comment claiming the reconciler swept it.
+    ///
+    /// ## The predicate, and why it is this one
+    ///
+    /// A live intent whose job has reached a **terminal state** is stranded:
+    /// the job is immutable from there, so no agent, commit or retry will ever
+    /// come back to resolve it. Same for a row whose job has been pruned away
+    /// entirely.
+    ///
+    /// The loop above already covers the other half — a live intent on a job
+    /// still *in flight* is escalated, never swept, because its agent may be
+    /// between the two renames right now.
+    ///
+    /// **`NeedsOperator` is excluded, and that exclusion is the whole safety
+    /// argument.** It is where an ambiguous commit lands, and the live intent
+    /// is what holds the destination reserved while a human looks at it.
+    /// Sweeping it would free a path whose on-disk state nobody has determined,
+    /// and the next job for that file would install over it.
+    ///
+    /// That exclusion is also why this does not reuse the agent's
+    /// `recover_one` decision table: with the ambiguous case carved out, every
+    /// row left here belongs to a job whose outcome was already decided and
+    /// recorded. There is nothing to adjudicate and no file to move — only a
+    /// ledger row to close.
+    ///
+    /// Best-effort and logged. A sweep that failed to run must not take the
+    /// reconciler's other work down with it.
+    fn sweep_stranded_intents(&self, outcome: &mut TickOutcome) {
+        let live = match self.intents.live() {
+            Ok(live) => live,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read live commit intents to sweep");
+                return;
+            }
+        };
+
+        for intent in live {
+            let verdict = match self.jobs.get(&intent.job_id) {
+                Ok(job) if job.state == JobState::NeedsOperator => continue,
+                Ok(job) if !job.state.is_terminal() => continue,
+                Ok(job) => format!("job is {} and will not resolve this", job.state.as_str()),
+                // A row whose job no longer exists can never be resolved by
+                // anything. Left alone it reserves that path for the life of
+                // the database.
+                Err(_) => "the job no longer exists".to_string(),
+            };
+
+            match self.writer.submit_blocking(
+                WriteLane::Commit,
+                CommitIntentRepo::resolve_op(intent.id.clone(), "swept".to_string()),
+            ) {
+                // Zero rows means something resolved it between the read and
+                // the write. That is the guard on `resolve_op` working, not a
+                // failure.
+                Ok(ack) if ack.rows == 0 => {}
+                Ok(_) => {
+                    tracing::warn!(
+                        intent = %intent.id, job = %intent.job_id,
+                        path = %intent.final_path, %verdict,
+                        "swept a stranded commit intent; its destination was reserved \
+                         against every future job for that file"
+                    );
+                    outcome.swept_intents.push(intent.id);
+                }
+                Err(e) => {
+                    tracing::error!(intent = %intent.id, error = %e,
+                        "could not sweep a stranded commit intent");
+                }
+            }
+        }
     }
 
     /// Return one job to the queue, or stop retrying it.
