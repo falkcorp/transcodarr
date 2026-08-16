@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.5.1
+// version: 1.5.2
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
@@ -271,10 +271,9 @@ impl AgentSession {
 impl pb::agent_service_server::AgentService for AgentSession {
     // ------------------------------------------------- TM_STREAM transport --
     //
-    // `FetchSource` serves bytes. `PushOutput` does not yet, and refuses
-    // explicitly rather than returning an accepted-but-ignored push, because
-    // that would look like success to a caller and produce a job that reports
-    // done having installed nothing.
+    // `FetchSource` serves the source down; `PushOutput` takes the finished
+    // encode back up and installs it, because a streaming agent has never been
+    // able to see the destination. Together they are the whole transport.
     //
     // A `TM_MOUNT` agent never reaches either.
 
