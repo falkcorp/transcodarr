@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/bin/transcodarr-agent.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: b5c59c65-0497-44f1-8c9d-b9dec72e1d96
-// last-edited: 2026-08-10
+// last-edited: 2026-08-16
 //! The agent, on its own, with no database in it.
 //!
 //! This exists because the rule the project already states was true of the
@@ -130,11 +130,29 @@ fn main() -> Result<()> {
     }
 }
 
-/// Logging, without pulling a subscriber crate into the agent's dependencies.
+/// Install a subscriber, so the agent's logs go somewhere.
 ///
-/// The agent already depends on `tracing`; a full subscriber would be another
-/// crate on a binary whose whole point is being small enough to copy anywhere.
-fn tracing_subscriber_init() {}
+/// **This was an empty function.** The comment here used to say logging was
+/// being done "without pulling a subscriber crate into the agent's
+/// dependencies", on the grounds that the binary should stay small enough to
+/// copy anywhere. Without a subscriber `tracing` discards every event, so what
+/// it actually achieved was an agent that cannot log at all — on the one
+/// platform this binary exists for. The Windows node ran blind: it registered,
+/// reconnected in a loop, and printed nothing to say so, while the same code
+/// invoked through the `transcodarr` CLI logged normally because *that* binary
+/// installs a subscriber.
+///
+/// The saving was imaginary too. `tracing-subscriber` is already in the
+/// workspace and in the CLI that links this same library.
+///
+/// `TRANSCODARR_LOG` then `RUST_LOG`, matching the CLI, defaulting to `info`.
+fn tracing_subscriber_init() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_env("TRANSCODARR_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(filter).with_target(false).init();
+}
 
 fn survey_only(args: &SurveyArgs) -> Result<()> {
     let capability = survey::survey(&survey_config(args)?)?;
