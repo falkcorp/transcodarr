@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
 //!
 //! This is where an agent asks permission, and the only place a `fencing_epoch`
@@ -60,7 +60,7 @@ use transcodarr_core::job::JobState;
 use transcodarr_proto::handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
 use transcodarr_store::repo::{
-    AgentRegistration, AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo,
+    AgentRegistration, AgentRepo, CommitIntentRepo, FileRepo, JobRepo, LibraryRepo,
 };
 
 use crate::hardening::{RetryDecision, decide_retry};
@@ -101,6 +101,8 @@ pub struct AgentSession {
     intents: CommitIntentRepo,
     jobs: JobRepo,
     libraries: LibraryRepo,
+    /// Resolves a job's file to the path streaming reads from.
+    files: FileRepo,
     fleet: AgentTable,
     writer: Arc<Writer>,
     gate: VersionGate,
@@ -131,6 +133,7 @@ impl AgentSession {
         intents: CommitIntentRepo,
         jobs: JobRepo,
         libraries: LibraryRepo,
+        files: FileRepo,
         writer: Arc<Writer>,
         auth_token: Option<String>,
     ) -> Self {
@@ -139,6 +142,7 @@ impl AgentSession {
             intents,
             jobs,
             libraries,
+            files,
             fleet: AgentTable::new(),
             writer,
             gate: VersionGate::default(),
@@ -257,26 +261,107 @@ impl AgentSession {
 impl pb::agent_service_server::AgentService for AgentSession {
     // ------------------------------------------------- TM_STREAM transport --
     //
-    // The wire contract for streaming exists; the byte plumbing behind it does
-    // not yet. These refuse explicitly rather than returning an empty stream or
-    // an accepted-but-ignored push, because either would look like success to a
-    // caller and produce a job that reports done having moved nothing.
+    // `FetchSource` serves bytes. `PushOutput` does not yet, and refuses
+    // explicitly rather than returning an accepted-but-ignored push, because
+    // that would look like success to a caller and produce a job that reports
+    // done having installed nothing.
     //
-    // A `TM_MOUNT` agent never reaches these. A `TM_STREAM` agent gets a clear
-    // reason at the first call instead of a silent failure later, which is the
-    // difference between "not built yet" and "mysteriously does nothing".
+    // A `TM_MOUNT` agent never reaches either.
 
     type FetchSourceStream = tokio_stream::wrappers::ReceiverStream<Result<pb::FileChunk, Status>>;
 
+    /// Serve a held job's source bytes to the agent holding it.
+    ///
+    /// ## Who is asking
+    ///
+    /// `FetchSourceRequest` carries no `agent_id`, deliberately — the same
+    /// argument as `Connect` (see the module docs): identity is a property of
+    /// the transport, not a field in the reviewed schema. So the caller is
+    /// named by `x-agent-id` metadata, and an unstamped request is refused
+    /// rather than served to whoever asked.
+    ///
+    /// ## Why two epoch checks and not one
+    ///
+    /// The epoch in the body is the agent's claim, rejected if stale exactly as
+    /// a `CommitReport` is. But an epoch that merely matches the registry only
+    /// proves the caller is a current instance of *some* agent — so the job row
+    /// is checked too, and it must name this caller. Without that second gate,
+    /// any live agent that learned a `job_id` could pull another agent's source.
+    ///
+    /// A refusal is a `Status`, never an empty stream. An empty-but-successful
+    /// stream is indistinguishable from a zero-byte file to the receiver, which
+    /// would turn "you may not have this" into "this file is empty".
     async fn fetch_source(
         &self,
-        _request: Request<pb::FetchSourceRequest>,
+        request: Request<pb::FetchSourceRequest>,
     ) -> Result<Response<Self::FetchSourceStream>, Status> {
-        Err(Status::unimplemented(
-            "streaming transport is not built yet: the server cannot serve source \
-             bytes. Run this agent with --transport mount, or wait for the \
-             FetchSource implementation.",
-        ))
+        let (agent_id, stream_epoch) = stream_identity(request.metadata())?;
+        let req = request.into_inner();
+
+        let claimed = i64::try_from(req.fencing_epoch)
+            .map_err(|_| Status::unauthenticated("fencing_epoch is out of range"))?;
+
+        // The two epochs come from the same place on a sane client. A
+        // disagreement means a confused caller, and guessing which one it meant
+        // is how a fence gets applied to the wrong instance.
+        if claimed != stream_epoch {
+            return Err(Status::unauthenticated(format!(
+                "epoch {claimed} in the request disagrees with {stream_epoch} in the metadata"
+            )));
+        }
+
+        let agent = self
+            .agents
+            .get(&agent_id)
+            .map_err(|e| Status::internal(format!("agent registry unreadable: {e}")))?
+            .ok_or_else(|| Status::unauthenticated("register before fetching"))?;
+
+        if agent.status == "Quarantined" {
+            return Err(Status::permission_denied("agent is quarantined"));
+        }
+        if claimed != agent.fencing_epoch {
+            return Err(Status::unauthenticated(format!(
+                "epoch {claimed} is not current ({}); register again",
+                agent.fencing_epoch
+            )));
+        }
+
+        let job = match self.jobs.get(&req.job_id) {
+            Ok(j) => j,
+            Err(transcodarr_store::StoreError::NotFound { .. }) => {
+                return Err(Status::not_found(format!("no job {}", req.job_id)));
+            }
+            Err(e) => return Err(Status::internal(format!("job lookup failed: {e}"))),
+        };
+
+        // The same fence as `on_result`: bytes follow the job's holder, not the
+        // caller's claim to be it.
+        if job.agent_id.as_deref() != Some(agent_id.as_str()) || job.fencing_epoch != claimed {
+            tracing::warn!(
+                agent = %agent_id, job = %req.job_id, epoch = claimed,
+                held_by = ?job.agent_id, job_epoch = job.fencing_epoch,
+                "refusing source bytes for a job this agent does not hold"
+            );
+            return Err(Status::permission_denied(
+                "this job is not held by you at this epoch",
+            ));
+        }
+
+        let file = self
+            .files
+            .get(job.file_id)
+            .map_err(|e| Status::internal(format!("file {} unreadable: {e}", job.file_id)))?;
+
+        tracing::info!(
+            agent = %agent_id, job = %req.job_id, path = %file.canonical_path,
+            "serving source bytes"
+        );
+
+        Ok(Response::new(crate::transfer::source_stream(
+            req.job_id,
+            req.attempt,
+            std::path::PathBuf::from(file.canonical_path),
+        )))
     }
 
     async fn push_output(

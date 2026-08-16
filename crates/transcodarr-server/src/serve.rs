@@ -29,7 +29,7 @@ use std::time::Duration;
 use tonic::transport::Server;
 
 use transcodarr_proto::pb;
-use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo};
+use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, FileRepo, JobRepo, LibraryRepo};
 
 use crate::ServerError;
 use crate::capacity::AgentLimits;
@@ -85,7 +85,8 @@ pub fn build(runtime: &Runtime, config: &ServeConfig) -> Serving {
         AgentRepo::new(pool.clone()),
         CommitIntentRepo::new(pool.clone()),
         JobRepo::new(pool.clone()),
-        LibraryRepo::new(pool),
+        LibraryRepo::new(pool.clone()),
+        FileRepo::new(pool),
         Arc::clone(runtime.writer()),
         config.auth_token.clone(),
     )

@@ -25,7 +25,7 @@ use tonic::transport::{Channel, Server};
 
 use transcodarr_proto::pb;
 use transcodarr_server::AgentSession;
-use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, JobRepo, LibraryRepo};
+use transcodarr_store::repo::{AgentRepo, CommitIntentRepo, FileRepo, JobRepo, LibraryRepo};
 use transcodarr_store::{Db, ReadPool, Writer};
 
 /// A live server on a loopback port, with a client already dialled.
@@ -46,6 +46,7 @@ async fn harness(auth_token: Option<&str>) -> Harness {
         CommitIntentRepo::new(pool.clone()),
         JobRepo::new(pool.clone()),
         LibraryRepo::new(pool.clone()),
+        FileRepo::new(pool.clone()),
         writer,
         auth_token.map(str::to_string),
     );
