@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/tests/register.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 8f27b0d5-63a1-4e94-b8c2-15de70a3968f
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! Registration over a real gRPC channel.
 //!
 //! Every test here starts a `tonic` server on a loopback port, dials it with

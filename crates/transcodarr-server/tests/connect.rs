@@ -776,6 +776,38 @@ async fn a_fetch_without_identity_metadata_is_refused() {
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "{err}");
 }
 
+/// Holding the row is not holding the work.
+///
+/// `transition_op` leaves `agent_id` and `fencing_epoch` untouched, so a failed
+/// job still names its last holder — and the epoch cannot tell the difference,
+/// since only a new `boot_id` bumps it. Nothing but the state says this work is
+/// over.
+#[tokio::test]
+async fn a_job_that_has_left_a_held_state_is_served_no_bytes() {
+    let mut h = harness().await;
+    let epoch = h.register().await;
+    h.seed_streamable_job("j-dead", "u1", epoch, b"finished with");
+
+    h.writer
+        .submit_blocking(
+            WriteLane::Normal,
+            JobRepo::transition_op(
+                "j-dead".into(),
+                JobState::Running,
+                JobState::Failed,
+                None,
+                None,
+            ),
+        )
+        .unwrap();
+
+    let err = collect(h.fetch("j-dead", epoch as u64, Some(("u1", epoch))).await)
+        .await
+        .expect_err("a failed job must not keep serving its source");
+
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err}");
+}
+
 #[tokio::test]
 async fn a_fetch_for_an_unknown_job_is_refused() {
     let mut h = harness().await;

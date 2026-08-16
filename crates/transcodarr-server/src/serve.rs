@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/serve.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 9e04c7b3-52d1-4a86-b70f-13c85fa62094
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! Running the server: the gRPC endpoint agents connect to.
 //!
 //! Everything an agent needs on the other end of `ConnectClient` already
