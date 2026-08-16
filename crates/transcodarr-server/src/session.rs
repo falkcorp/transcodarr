@@ -347,6 +347,24 @@ impl pb::agent_service_server::AgentService for AgentSession {
             ));
         }
 
+        // Holding the row is not the same as still holding the work.
+        // `transition_op` changes `state` and leaves `agent_id` and
+        // `fencing_epoch` exactly as they were, so a job that has since failed
+        // or been dead-lettered still names its last holder — and the epoch
+        // cannot tell the difference, because only a new `boot_id` bumps it.
+        // Without this the agent that just failed a job can keep pulling its
+        // source indefinitely.
+        if !HELD_STATES.contains(&job.state) {
+            tracing::warn!(
+                agent = %agent_id, job = %req.job_id, state = ?job.state,
+                "refusing source bytes for a job that is no longer live"
+            );
+            return Err(Status::failed_precondition(format!(
+                "job is {:?}, not work you are holding",
+                job.state
+            )));
+        }
+
         let file = self
             .files
             .get(job.file_id)
