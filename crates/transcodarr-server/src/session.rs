@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
@@ -60,8 +60,18 @@ use transcodarr_core::job::JobState;
 use transcodarr_proto::handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
 use transcodarr_store::repo::{
-    AgentRegistration, AgentRepo, CommitIntentRepo, FileRepo, JobRepo, LibraryRepo,
+    AgentRegistration, AgentRepo, CommitIntentRepo, FileRepo, JobRepo, LibraryRepo, TrashRepo,
 };
+
+// The install a streaming agent cannot perform for itself. Same ritual the
+// mount-mode agent runs against the share, run here instead — not a second
+// implementation of it.
+use transcodarr_agent::identity::{agent_uid, boot_id};
+use transcodarr_agent::{
+    CommitRequest as AgentCommitRequest, CommitRitual, Resolution, SourceGuard, WorkArea,
+};
+
+use crate::runner::DEFAULT_RETENTION_SECONDS;
 
 use crate::hardening::{RetryDecision, decide_retry};
 use transcodarr_core::failure::FailureClass;
@@ -310,21 +320,7 @@ impl pb::agent_service_server::AgentService for AgentSession {
             )));
         }
 
-        let agent = self
-            .agents
-            .get(&agent_id)
-            .map_err(|e| Status::internal(format!("agent registry unreadable: {e}")))?
-            .ok_or_else(|| Status::unauthenticated("register before fetching"))?;
-
-        if agent.status == "Quarantined" {
-            return Err(Status::permission_denied("agent is quarantined"));
-        }
-        if claimed != agent.fencing_epoch {
-            return Err(Status::unauthenticated(format!(
-                "epoch {claimed} is not current ({}); register again",
-                agent.fencing_epoch
-            )));
-        }
+        self.require_current_epoch(&agent_id, claimed)?;
 
         let job = match self.jobs.get(&req.job_id) {
             Ok(j) => j,
@@ -382,15 +378,250 @@ impl pb::agent_service_server::AgentService for AgentSession {
         )))
     }
 
+    /// Receive a streaming agent's output and install it on its behalf.
+    ///
+    /// ## This is the agent's local commit, performed here
+    ///
+    /// A mount-mode agent finishes an encode, sends a `CommitRequest`, runs the
+    /// ritual against the share itself, and sends a `CommitReport`. A streaming
+    /// agent cannot: it has never been able to see the destination. So the same
+    /// three steps happen here, against the same ledger, using the same
+    /// [`AgentSession::judge_commit`] the mount path uses. Nothing about the
+    /// decision is re-derived — a second implementation of "may this agent
+    /// replace this file" is a second implementation that can disagree.
+    ///
+    /// ## The intent is *not* granted here
+    ///
+    /// It already exists. The orchestrator writes the `commit_intent` row at
+    /// dispatch, before the assignment goes out, precisely so the destination
+    /// is reserved for the length of the encode rather than from the moment the
+    /// agent asks. `LocalRunner` grants its own because nothing dispatched to
+    /// it; a job that arrived over the wire is always already granted, and
+    /// granting again would collide on the primary key.
+    ///
+    /// ## Order
+    ///
+    /// Judge, then receive, then judge again and move to `Committing`, then
+    /// install. The first judgement is a courtesy — it refuses a doomed
+    /// transfer before megabytes cross the network. The second is the
+    /// load-bearing one, because an epoch can be revoked while the bytes are in
+    /// flight, and it sits immediately before the only irreversible step.
     async fn push_output(
         &self,
-        _request: Request<tonic::Streaming<pb::FileChunk>>,
+        request: Request<tonic::Streaming<pb::FileChunk>>,
     ) -> Result<Response<pb::PushOutputResponse>, Status> {
-        Err(Status::unimplemented(
-            "streaming transport is not built yet: the server cannot accept output \
-             bytes or install them. Run this agent with --transport mount, or wait \
-             for the PushOutput implementation.",
+        let (agent_id, epoch) = stream_identity(request.metadata())?;
+        // Before a chunk is read. `judge_commit` below cannot stand in for
+        // this: the intent was granted under this very epoch, so a superseded
+        // instance replaying its own grant satisfies it.
+        self.require_current_epoch(&agent_id, epoch)?;
+        let mut chunks = request.into_inner();
+
+        // The first chunk names the work. Nothing is opened, created or
+        // reserved before it has been read and judged.
+        let Some(first) = chunks.message().await? else {
+            return Err(Status::invalid_argument(
+                "a push must carry at least one chunk; an empty stream says nothing",
+            ));
+        };
+        let job_id = first.job_id.clone();
+        let attempt = i64::from(first.attempt);
+
+        let job = match self.jobs.get(&job_id) {
+            Ok(j) => j,
+            Err(transcodarr_store::StoreError::NotFound { .. }) => {
+                return Err(Status::not_found(format!("no job {job_id}")));
+            }
+            Err(e) => return Err(Status::internal(format!("job lookup failed: {e}"))),
+        };
+
+        // Checked before a staging file exists, not after. Staging and the
+        // ledger row are both keyed on `(job_id, attempt)`, so a mislabelled
+        // push that got as far as opening a `Sink` would leave bytes filed
+        // under an attempt nothing will ever resolve. `FetchSource` can ignore
+        // the attempt because every attempt reads the same source; this cannot.
+        if attempt != job.attempt {
+            return Ok(Response::new(refused(format!(
+                "this is attempt {}, not {attempt}",
+                job.attempt
+            ))));
+        }
+
+        let ask = pb::CommitRequest {
+            job_id: job_id.clone(),
+            attempt: first.attempt,
+            fencing_epoch: u64::try_from(epoch).unwrap_or(u64::MAX),
+        };
+        let (granted, reason, trash_path) = self.judge_commit(&agent_id, epoch, &ask)?;
+        if !granted {
+            tracing::warn!(agent = %agent_id, job = %job_id, %reason, "push refused before transfer");
+            return Ok(Response::new(refused(reason)));
+        }
+
+        let library = self
+            .libraries
+            .get(&job.library_id)
+            .map_err(|e| Status::internal(format!("library lookup failed: {e}")))?;
+        let file = self
+            .files
+            .get(job.file_id)
+            .map_err(|e| Status::internal(format!("file {} unreadable: {e}", job.file_id)))?;
+        let final_path = std::path::PathBuf::from(&file.canonical_path);
+
+        // The work area belongs to this server process, not to the agent: the
+        // server is the party that stages, installs, and would have to recover
+        // from its own crash mid-ritual.
+        let work = WorkArea::open(
+            std::path::Path::new(&library.work_dir),
+            &agent_uid(),
+            boot_id(),
+        )
+        .map_err(|e| Status::internal(format!("work area unusable: {e}")))?;
+
+        // Refuse before receiving, not after. A work area on another filesystem
+        // turns the install's rename into a copy, and discovering that after a
+        // multi-gigabyte transfer wastes the transfer.
+        work.ensure_same_device(&final_path)
+            .map_err(|e| Status::failed_precondition(format!("{e}")))?;
+        work.clear(&job_id, attempt, &final_path)
+            .map_err(|e| Status::internal(format!("could not clear the work area: {e}")))?;
+
+        let temp = work.temp_path(&job_id, attempt, &final_path);
+        let received = match receive(&mut chunks, first, &temp, &job_id, attempt).await {
+            Ok(n) => n,
+            Err(e) => {
+                // `Sink` leaves the partial file behind by contract, so that
+                // the caller can decide. The decision is always to remove it:
+                // a half-written staging file is indistinguishable from a
+                // complete one to anything that finds it later.
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        };
+
+        // Judged again, because the transfer took time and an epoch can be
+        // retired inside it. This is the check that actually fences the
+        // install; the first one only saved the bandwidth.
+        if let Err(e) = self.require_current_epoch(&agent_id, epoch) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        let (still_granted, reason, trash_path) = match self.judge_commit(&agent_id, epoch, &ask)? {
+            (true, _, t) => (true, String::new(), t),
+            (false, why, _) => (false, why, trash_path),
+        };
+        if !still_granted {
+            let _ = std::fs::remove_file(&temp);
+            tracing::warn!(agent = %agent_id, job = %job_id, %reason,
+                "the grant lapsed while the output was in flight; nothing installed");
+            return Ok(Response::new(refused(reason)));
+        }
+
+        // `Committing` is the state the reconciler refuses to guess about, and
+        // the window it covers must start before the destination is touched.
+        // A failure to record it withdraws the permission rather than
+        // proceeding: an install the server could not write down is one the
+        // reconciler would later requeue on top of.
+        if let Err(e) = self
+            .write(JobRepo::transition_op(
+                job_id.clone(),
+                JobState::Verifying,
+                JobState::Committing,
+                None,
+                None,
+            ))
+            .await
+        {
+            let _ = std::fs::remove_file(&temp);
+            tracing::error!(job = %job_id, error = %e,
+                "could not record the commit; refusing rather than installing blind");
+            return Ok(Response::new(refused(
+                "the server could not record this commit".to_string(),
+            )));
+        }
+
+        // The facts the plan was made against, taken from the row rather than
+        // from a fresh stat. The server never watched this file and cannot
+        // `observe()` it the way an in-process runner does — but the scanner is
+        // the only writer of these columns, so the row *is* what the job was
+        // planned against, which is what `SourceGuard` documents itself as
+        // holding. This closes the whole planning-to-install window rather than
+        // just the encode. A rescan in between refreshes the row, so a source
+        // that changed and was rescanned can still slip through; that is a
+        // narrower hole than mount mode's, not the absence of one.
+        let guard = SourceGuard {
+            size_bytes: u64::try_from(file.size_bytes).unwrap_or(0),
+            mtime_unix: file.mtime_unix,
+            inode: file.inode.and_then(|i| u64::try_from(i).ok()),
+        };
+
+        let journal = work
+            .open_journal()
+            .map_err(|e| Status::internal(format!("journal unusable: {e}")))?;
+        let ritual = CommitRitual::new(journal, work.clone());
+        let resolution = ritual
+            .commit(&AgentCommitRequest {
+                job_id: job_id.clone(),
+                attempt,
+                fencing_epoch: epoch,
+                temp_path: temp.clone(),
+                final_path: final_path.clone(),
+                trash_path: std::path::PathBuf::from(&trash_path),
+                expected_content_sig: job.expected_content_sig.clone(),
+                source_guard: guard,
+            })
+            .map_err(|e| Status::internal(format!("the install failed: {e}")))?;
+
+        let label = resolution.label();
+
+        // Resolve whatever happened, so the destination is not left locked by a
+        // live intent nobody will finish.
+        self.write(CommitIntentRepo::resolve_op(
+            format!("{job_id}:{attempt}"),
+            label.to_string(),
         ))
+        .await?;
+
+        let (to, code) = outcome_of(label);
+        if let Err(e) = self
+            .write(JobRepo::transition_op(
+                job_id.clone(),
+                JobState::Committing,
+                to,
+                Some(code.to_string()),
+                None,
+            ))
+            .await
+        {
+            tracing::error!(job = %job_id, error = %e, "could not record how the commit ended");
+        }
+
+        // Only once the original really is where the row will say it is.
+        // Writing this first would point the reaper at a live file.
+        if let Resolution::Installed { trash_path, .. } = &resolution {
+            self.write(TrashRepo::retain_op(
+                Some(file.id),
+                Some(job_id.clone()),
+                file.canonical_path.clone(),
+                trash_path.to_string_lossy().to_string(),
+                file.size_bytes,
+                DEFAULT_RETENTION_SECONDS,
+            ))
+            .await?;
+        }
+
+        let installed = matches!(resolution, Resolution::Installed { .. });
+        tracing::info!(agent = %agent_id, job = %job_id, resolution = %label, bytes = received,
+            "a streamed output was installed by the server");
+        Ok(Response::new(pb::PushOutputResponse {
+            accepted: installed,
+            reason: if installed {
+                String::new()
+            } else {
+                format!("the install resolved as {label}")
+            },
+            bytes_received: received,
+        }))
     }
 
     async fn register(
@@ -657,6 +888,68 @@ fn validation_passed(json: &str) -> bool {
 /// do, so it fails rather than quietly counting as done. `needs_operator` is
 /// neither: nobody knows what is on disk, and the one thing that must not
 /// happen is a machine deciding.
+/// A considered "no" to a push.
+///
+/// A refusal is a successful RPC carrying a reason, not a transport error: the
+/// server understood the request and declined it, and an agent needs the reason
+/// to decide whether to retry, re-register or give up. Transport *failures* —
+/// no identity, a corrupt transfer, a stream that never ends — stay `Status`,
+/// because those are not answers.
+fn refused(reason: String) -> pb::PushOutputResponse {
+    pb::PushOutputResponse {
+        accepted: false,
+        reason,
+        bytes_received: 0,
+    }
+}
+
+/// Stage a pushed transfer, returning how many bytes landed.
+///
+/// The first chunk has already been read — it is what named the job — so it is
+/// passed back in rather than re-read.
+async fn receive(
+    chunks: &mut tonic::Streaming<pb::FileChunk>,
+    first: pb::FileChunk,
+    temp: &std::path::Path,
+    job_id: &str,
+    attempt: i64,
+) -> Result<u64, Status> {
+    let mut sink = crate::transfer::Sink::create(temp)
+        .map_err(|e| Status::internal(format!("cannot stage at {}: {e}", temp.display())))?;
+
+    let mut chunk = first;
+    loop {
+        // `Sink` checks offsets, not identity: it would happily append one
+        // job's bytes to another job's staging file at the right offset, and
+        // the result would be a file of the correct length and the wrong
+        // contents — the exact failure its offset check exists to prevent.
+        if chunk.job_id != job_id || i64::from(chunk.attempt) != attempt {
+            return Err(Status::invalid_argument(format!(
+                "a chunk for {}:{} arrived inside a transfer of {job_id}:{attempt}; \
+                 one stream carries one attempt",
+                chunk.job_id, chunk.attempt
+            )));
+        }
+
+        if sink.accept(&chunk).map_err(Status::data_loss)? {
+            return Ok(sink.written());
+        }
+
+        match chunks.message().await? {
+            Some(next) => chunk = next,
+            // The proto sets `last` explicitly for this reason: a stream that
+            // simply stops is indistinguishable from a sender that died, and
+            // installing what arrived would install a truncation.
+            None => {
+                return Err(Status::data_loss(
+                    "the stream ended without a final chunk; a transfer that stopped is not a \
+                     transfer that finished",
+                ));
+            }
+        }
+    }
+}
+
 fn outcome_of(resolution: &str) -> (JobState, &'static str) {
     let to = match resolution {
         "installed" => JobState::Succeeded,
@@ -995,6 +1288,39 @@ impl AgentSession {
                 })),
             },
         );
+        Ok(())
+    }
+
+    /// Check a self-asserted epoch against the registry.
+    ///
+    /// **Not the same check as [`AgentSession::judge_commit`], and not implied
+    /// by it.** `judge_commit` compares the caller's epoch against the *intent*,
+    /// which is sufficient on `Connect`, where the epoch arrived on a stream the
+    /// server itself authenticated. `FetchSource` and `PushOutput` are separate
+    /// RPCs whose epoch is asserted in metadata by the caller, so a superseded
+    /// instance can present the very epoch its own intent was granted under and
+    /// satisfy every check that only compares the two against each other. The
+    /// registry is the only party that knows an epoch has been retired.
+    ///
+    /// Shared by both streaming RPCs rather than written twice, because two
+    /// copies of a fence are two fences that can drift apart.
+    #[allow(clippy::result_large_err)]
+    fn require_current_epoch(&self, agent_id: &str, claimed: i64) -> Result<(), Status> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .map_err(|e| Status::internal(format!("agent registry unreadable: {e}")))?
+            .ok_or_else(|| Status::unauthenticated("register before streaming"))?;
+
+        if agent.status == "Quarantined" {
+            return Err(Status::permission_denied("agent is quarantined"));
+        }
+        if claimed != agent.fencing_epoch {
+            return Err(Status::unauthenticated(format!(
+                "epoch {claimed} is not current ({}); register again",
+                agent.fencing_epoch
+            )));
+        }
         Ok(())
     }
 
