@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.8.0 -->
+<!-- version: 3.10.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -181,6 +181,45 @@ or byte ranges.
    Video with `hevc_nvenc` is what remains. Use an **8-bit H.264 source** and
    software decode; the Turing traps below are unchanged and untested by this.
 
+   ### What actually blocks video, measured 2026-08-16
+
+   Not the transport, and **not primarily the Phase 5 code**. A `VideoGpu` job
+   requires `Decoder(h264/High/Eight, Nvdec)` at `VerifiedOk`; `survey.rs:103`
+   ships `decoders: Vec::new()` because trial decodes are Phase 5. Implementing
+   Phase 5 exactly as specified **would still leave that node unable to take
+   video work**, for a reason that is about the box, not the design:
+
+   - The design already rules out embedded fixtures. `task-inventory.json`
+     S14-007 generates tiny lavfi clips "so probing needs no library media and
+     no LFS fixtures", choosing a **software** encoder per codec
+     (h264→libx264, hevc→libx265) and marking the triple `Untested` when that
+     encoder is absent. So the answer to "where does the sample come from" was
+     never fixtures — do not reintroduce them.
+   - That node's ffmpeg is a **BtbN LGPL build**: `--disable-libx264
+     --disable-libx265` (confirmed in `ffmpeg -version` configuration). So the
+     h264 and hevc samples cannot be generated, both triples go `Untested`, and
+     the requirement stays unmet.
+   - It *does* have `--enable-libopenh264` and `--enable-libkvazaar`. Measured
+     on the box: `libopenh264` emits **`profile=Constrained Baseline`**, so it
+     cannot honestly satisfy a `High` triple — recording one from a Baseline
+     sample would be the exact class of lie the trial exists to prevent.
+   - Measured on the box: **`h264_nvenc -profile:v high` produces a genuine
+     `profile=High`, `yuv420p` sample.** So a hardware-encoder fallback in the
+     sample generator does unblock `(h264, High, Eight)`.
+   - **The Hi10 trap cannot be reproduced on that box at all.** NVENC has no
+     H.264 High10 encode path and openh264 is 8-bit only, so
+     `(h264, High10, Ten)` — the silent-CPU-fallback case that motivated
+     `VerifiedSoftFallback` — stays `Untested` unless a GPL ffmpeg is
+     installed.
+
+   Three ways forward, and they differ in what gets built:
+
+   | | what it costs | Hi10 trap testable |
+   |---|---|---|
+   | install a GPL ffmpeg build on the node | ops, remote-doable, side-by-side | **yes** |
+   | ordered encoder list w/ hardware fallback in the sample generator | code only, no box change | no |
+   | Phase 5 exactly as written | correct code, node still blocked | no |
+
    **Two bugs stood between the merged code and a working node, and neither was
    in the transport.** Both are the same shape: a thing that looked configured
    and did nothing.
@@ -223,6 +262,35 @@ or byte ranges.
    bug.
 
 6. **Mount mode last** — see below, it needs hands on the box.
+
+## The pattern to keep checking for: documented, tested, and never called
+
+Four times in one session, in the same shape — a facility that exists, whose
+doc comment describes it as the answer to a real question, with **no production
+caller**. Each had passing unit tests. A unit test proves a component works when
+it is called; nothing in one can notice that nothing calls it.
+
+- `CommitIntentRepo::live()` — "what the reconciler sweeps". Nothing swept.
+  (PR #85)
+- `tracing_subscriber_init()` — an empty function body. (PR #87)
+- `AgentClass::Audio` — advertised by every agent, required by no job. (PR #87)
+- `dispatch_block` — `dispatch.rs:22` says outright it is how you answer
+  "nothing is running and I do not know why", and the dispatcher never wrote a
+  row. `explain` then read the row and printed only `blocking_stage`, dropping
+  the detail. Worse, `tick()` returned before the dispatcher ran when the fleet
+  was empty or the schedule was paused, so the two conditions that stop the
+  entire queue were the two with no record at all. (PR #88)
+
+**How to find the next one:** grep for a public item, then grep for its callers
+outside its own test module. If the only hits are the definition and its tests,
+that is the shape. `findReferences` answers it in one call.
+
+**And wiring observability is where you are most likely to break it.** PR #88's
+first commit made `TickOutcome` non-default on a path that used to produce
+nothing, so `run()` began logging at `info` every five seconds — ~17k lines a
+day — in exactly the steady state a broken deployment sits in. It took a
+two-minute run with the real binary to see; no test sits in a failure mode long
+enough to notice volume.
 
 ## Mount mode needs the owner at the console
 
