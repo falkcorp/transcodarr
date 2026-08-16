@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/orchestrator.rs
-// version: 1.4.0
+// version: 1.4.1
 // guid: 74b2e9c0-3a58-4f16-9d47-0e85b3c21fa6
 // last-edited: 2026-08-16
 //! The loop: queue in, assignments out, and the ledger kept honest.
@@ -162,25 +162,51 @@ impl Orchestrator {
     }
 
     /// Run until the future resolves.
+    ///
+    /// ## A stuck queue is a steady state, not an event
+    ///
+    /// A pass that placed, requeued or escalated something is news every time.
+    /// A pass that only *blocked* things is news the first time and noise for
+    /// as long as the condition lasts — and the conditions that block the whole
+    /// window, an empty fleet or a paused schedule, are exactly the ones a
+    /// broken deployment sits in for hours. Logging that at `info` every tick
+    /// buries the line that would explain it under thousands of copies of
+    /// itself. So a purely-blocked pass is reported when the reasons change,
+    /// and at `debug` while they hold.
     pub async fn run(&self, tick: Duration, shutdown: impl std::future::Future<Output = ()>) {
         tokio::pin!(shutdown);
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_blocked: Vec<(String, &'static str)> = Vec::new();
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 _ = ticker.tick() => {
                     match self.tick().await {
                         Ok(outcome) if outcome != TickOutcome::default() => {
-                            tracing::info!(
-                                dispatched = outcome.dispatched.len(),
-                                blocked = outcome.blocked.len(),
-                                requeued = outcome.requeued.len(),
-                                escalated = outcome.escalated.len(),
-                                "dispatch pass"
-                            );
+                            let only_blocked = outcome.dispatched.is_empty()
+                                && outcome.requeued.is_empty()
+                                && outcome.escalated.is_empty()
+                                && outcome.swept_intents.is_empty();
+                            let unchanged = only_blocked && outcome.blocked == last_blocked;
+                            last_blocked.clone_from(&outcome.blocked);
+
+                            if unchanged {
+                                tracing::debug!(
+                                    blocked = outcome.blocked.len(),
+                                    "dispatch pass: nothing changed"
+                                );
+                            } else {
+                                tracing::info!(
+                                    dispatched = outcome.dispatched.len(),
+                                    blocked = outcome.blocked.len(),
+                                    requeued = outcome.requeued.len(),
+                                    escalated = outcome.escalated.len(),
+                                    "dispatch pass"
+                                );
+                            }
                         }
-                        Ok(_) => {}
+                        Ok(_) => last_blocked.clear(),
                         // A failed pass is logged and the loop continues. The
                         // next tick re-reads everything from the database, so a
                         // transient store error costs five seconds rather than

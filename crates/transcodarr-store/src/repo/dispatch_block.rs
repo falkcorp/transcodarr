@@ -1,5 +1,5 @@
 // file: crates/transcodarr-store/src/repo/dispatch_block.rs
-// version: 1.1.0
+// version: 1.1.1
 // guid: 4c17e5a0-93b6-42d8-8e14-70b9d2f36a58
 // last-edited: 2026-08-16
 //! Why each queued job did not dispatch last round.
@@ -24,8 +24,13 @@ pub struct DispatchBlock {
     pub job_id: String,
     /// When the dispatcher last considered it.
     pub at_unix: i64,
-    /// Which stage of dispatch rejected it — capability match, capacity,
-    /// schedule, mount, or admission.
+    /// Which stage of dispatch rejected it.
+    ///
+    /// `fleet` (no agent is connected at all) and `schedule` stop the whole
+    /// window before the dispatcher runs; `capability` (no agent could ever
+    /// take this job) and `capacity` (every agent that could is full) are the
+    /// dispatcher's own per-job verdicts. `mount` and `admission` are named by
+    /// the schema and not yet emitted.
     pub blocking_stage: String,
     /// Stage-specific detail, as stored JSON.
     pub detail_json: Option<String>,
