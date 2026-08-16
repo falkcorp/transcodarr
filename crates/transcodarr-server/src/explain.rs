@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/explain.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 4e0d29b7-8c61-4a35-b7f8-13a95206ecd4
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 //! Answering "why is this file not being transcoded?".
 //!
 //! The question an operator actually asks, and the one Tdarr could never
@@ -148,6 +148,13 @@ impl Explanation {
                     "\njob       {} {} ({})\n          not dispatching: {}\n",
                     j.id, j.state, j.class, b.blocking_stage
                 ));
+                // The stage alone says "capability" and stops. The requirement
+                // that actually went unmet is the whole answer, and printing
+                // only the category means the operator's next move is still to
+                // restart the server under a debug filter.
+                if let Some(reason) = b.reason() {
+                    out.push_str(&format!("          {reason}\n"));
+                }
             }
             (Some(j), None) => {
                 out.push_str(&format!("\njob       {} {} ({})\n", j.id, j.state, j.class));
@@ -469,6 +476,56 @@ mod tests {
         assert!(e.job.is_some(), "the job the evaluator created must show");
         assert_eq!(e.job.as_ref().unwrap().file_id, id);
         assert!(e.render().contains("Audio"));
+    }
+
+    /// The whole point of persisting the dispatcher's reasoning is that it
+    /// reaches the operator. Rendering only `blocking_stage` prints "capacity"
+    /// and stops — true, and useless, because the next move is still to restart
+    /// the server under a debug filter and wait for the pass to come round.
+    #[test]
+    fn a_blocked_job_shows_the_reason_and_not_merely_the_stage() {
+        let h = harness();
+        h.add("/mnt/tv/a.mkv", Some(truehd_facts()));
+        crate::Evaluator::new(
+            h.pool.clone(),
+            Arc::clone(&h.writer),
+            SizeThresholds::default(),
+        )
+        .evaluate_library("tv", &policy::default_space_saver())
+        .unwrap();
+
+        let policy = policy::default_space_saver();
+        let job_id = Explainer::new(h.pool.clone())
+            .explain("/mnt/tv/a.mkv", &policy)
+            .unwrap()
+            .job
+            .expect("the evaluator should have opened one")
+            .id;
+
+        let reason = "no enabled, commit-eligible agent satisfies encoder(eac3)";
+        h.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                transcodarr_store::repo::DispatchBlockRepo::upsert_op(
+                    job_id,
+                    "capability".into(),
+                    Some(transcodarr_store::repo::DispatchBlock::detail_for(reason)),
+                ),
+            )
+            .unwrap();
+
+        let rendered = Explainer::new(h.pool.clone())
+            .explain("/mnt/tv/a.mkv", &policy)
+            .unwrap()
+            .render();
+        assert!(
+            rendered.contains("not dispatching: capability"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(reason), "{rendered}");
+        // The stored JSON envelope is an implementation detail of the column,
+        // not something to print at an operator.
+        assert!(!rendered.contains("{\"reason\""), "{rendered}");
     }
 
     /// A path nobody has scanned is not an empty explanation — it is a

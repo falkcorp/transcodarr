@@ -1,7 +1,7 @@
 // file: crates/transcodarr-store/src/repo/dispatch_block.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 4c17e5a0-93b6-42d8-8e14-70b9d2f36a58
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 //! Why each queued job did not dispatch last round.
 //!
 //! Without this table, "nothing is running and I do not know why" is an
@@ -32,6 +32,33 @@ pub struct DispatchBlock {
 }
 
 impl DispatchBlock {
+    /// The detail in the form an operator reads it.
+    ///
+    /// `detail_json` holds an object so the shape can grow without a
+    /// migration; the dispatcher writes `{"reason": "..."}`. A row whose
+    /// detail is not that shape is handed back verbatim rather than dropped,
+    /// because a reason an operator cannot see costs exactly as much as a
+    /// reason nobody recorded — which is the failure this table was built to
+    /// prevent.
+    pub fn reason(&self) -> Option<String> {
+        let raw = self.detail_json.as_deref()?;
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(v) => match v.get("reason").and_then(|r| r.as_str()) {
+                Some(r) => Some(r.to_string()),
+                None => Some(raw.to_string()),
+            },
+            Err(_) => Some(raw.to_string()),
+        }
+    }
+
+    /// Wrap an operator-facing sentence as the stored detail.
+    ///
+    /// Paired with [`DispatchBlock::reason`] so callers never hand prose to a
+    /// column named `_json`.
+    pub fn detail_for(reason: &str) -> String {
+        serde_json::json!({ "reason": reason }).to_string()
+    }
+
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             job_id: row.get("job_id")?,
@@ -214,6 +241,47 @@ mod tests {
         f.write(DispatchBlockRepo::clear_op("j1".into()));
         assert!(repo.get("j1").unwrap().is_none());
         assert!(repo.count_by_stage().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reason_survives_the_round_trip_through_the_column() {
+        let (f, repo) = seeded(&["j1"]);
+        let prose = "no enabled, commit-eligible agent satisfies decoder(h264/High/Eight, nvdec)";
+        f.write(DispatchBlockRepo::upsert_op(
+            "j1".into(),
+            "capability".into(),
+            Some(DispatchBlock::detail_for(prose)),
+        ));
+        assert_eq!(
+            repo.get("j1").unwrap().unwrap().reason().as_deref(),
+            Some(prose)
+        );
+    }
+
+    /// Rows written before the `{"reason": ...}` convention, or by hand at a
+    /// `sqlite3` prompt, still have to render. A detail an operator cannot see
+    /// costs as much as one nobody recorded.
+    #[test]
+    fn a_detail_that_is_not_the_expected_shape_is_shown_verbatim() {
+        let (f, repo) = seeded(&["j1", "j2"]);
+        f.write(DispatchBlockRepo::upsert_op(
+            "j1".into(),
+            "capability".into(),
+            Some("plain prose, not JSON at all".into()),
+        ));
+        f.write(DispatchBlockRepo::upsert_op(
+            "j2".into(),
+            "capability".into(),
+            Some(r#"{"unmet":"nvenc_hevc_10bit"}"#.into()),
+        ));
+        assert_eq!(
+            repo.get("j1").unwrap().unwrap().reason().as_deref(),
+            Some("plain prose, not JSON at all")
+        );
+        assert_eq!(
+            repo.get("j2").unwrap().unwrap().reason().as_deref(),
+            Some(r#"{"unmet":"nvenc_hevc_10bit"}"#)
+        );
     }
 
     #[test]
