@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/register.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 8f27b0d5-63a1-4e94-b8c2-15de70a3968f
 // last-edited: 2026-08-16
 //! Registration over a real gRPC channel.
@@ -275,6 +275,63 @@ async fn an_unproven_rename_probe_does_not_grant_commit_eligibility() {
     assert!(
         !h.agents.get("u1").unwrap().unwrap().commit_eligible,
         "untested must never satisfy commit eligibility"
+    );
+}
+
+/// **A streaming agent advertises no mounts by design, and must still be
+/// commit eligible.**
+///
+/// Found by running the two real binaries against each other, not by any test.
+/// `commit_eligible` required `!mounts.is_empty()`, so a `TM_STREAM` agent was
+/// permanently ineligible — and `Dispatcher::place` skips an ineligible agent
+/// as a candidate outright. A streaming agent could never be handed work at
+/// all, and the whole streaming transport was unreachable in production while
+/// 573 tests passed.
+///
+/// The reason none of them caught it: every dispatch test registers its agents
+/// through a harness that sets `commit_eligible: true` directly, bypassing the
+/// rule under test here. A fixture that asserts the precondition it is meant to
+/// exercise cannot fail on it.
+///
+/// The rename that has to be atomic under streaming is between the *server's*
+/// work directory and the library, because the server installs. That is not
+/// something the agent can attest to in either direction.
+#[tokio::test]
+async fn a_streaming_agent_is_commit_eligible_without_any_mounts() {
+    let mut h = harness(None).await;
+    let mut req = request("boot-a", "");
+    req.capability = Some(pb::Capability {
+        transport: pb::TransportMode::TmStream as i32,
+        workarea_path: "/var/tmp/work".into(),
+        mounts: Vec::new(),
+        ..capability(pb::RenameProbeStatus::RpUntested)
+    });
+
+    let res = h.client.register(req).await.unwrap().into_inner();
+    assert!(res.accepted, "{}", res.reject_reason);
+    assert!(
+        h.agents.get("u1").unwrap().unwrap().commit_eligible,
+        "a streaming agent has no mounts to probe and does not install; \
+         refusing it eligibility makes it undispatchable forever"
+    );
+}
+
+/// The mount-mode rule is unchanged, so the exemption above is scoped to the
+/// transport rather than being a hole in the probe.
+#[tokio::test]
+async fn a_mount_agent_with_no_mounts_is_still_not_commit_eligible() {
+    let mut h = harness(None).await;
+    let mut req = request("boot-a", "");
+    req.capability = Some(pb::Capability {
+        mounts: Vec::new(),
+        ..capability(pb::RenameProbeStatus::RpAtomicVerified)
+    });
+
+    let res = h.client.register(req).await.unwrap().into_inner();
+    assert!(res.accepted, "{}", res.reject_reason);
+    assert!(
+        !h.agents.get("u1").unwrap().unwrap().commit_eligible,
+        "a mount agent that offers nothing has demonstrated nothing"
     );
 }
 

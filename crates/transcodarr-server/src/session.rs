@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.5.3
+// version: 1.6.0
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use transcodarr_core::capability::Capability;
+use transcodarr_core::capability::{Capability, TransportMode};
 use transcodarr_core::job::JobState;
 use transcodarr_proto::handshake::{AgentIdentity, RegisterOutcome, VersionGate};
 use transcodarr_proto::{MIN_SUPPORTED_PROTO, PROTO_VERSION, pb};
@@ -217,7 +217,23 @@ impl AgentSession {
     /// would otherwise be trusted to install everywhere — and the commit ritual
     /// depends on `rename(2)` being atomic on the pool it is actually writing
     /// to. `RP_UNTESTED` grants nothing: absence of a trial is not evidence.
-    fn commit_eligible(mounts: &[pb::Mount]) -> bool {
+    /// Under [`TransportMode::Stream`] the question does not apply, and
+    /// answering it from the mount table gets it backwards. A streaming agent
+    /// advertises **no mounts by design** (see `agent.proto`), so the
+    /// `!mounts.is_empty()` clause below made every such agent permanently
+    /// ineligible — and `Dispatcher::place` skips an ineligible agent as a
+    /// candidate outright, so a streaming agent could never be given work at
+    /// all.
+    ///
+    /// The rename that has to be atomic is between the *server's* work
+    /// directory and the library, because the server performs the install in
+    /// `push_output`. That is a property of the server's filesystem and nothing
+    /// the agent can attest to either way. Whether it holds is checked where
+    /// the install happens; it is not this gate's question.
+    fn commit_eligible(transport: TransportMode, mounts: &[pb::Mount]) -> bool {
+        if transport == TransportMode::Stream {
+            return true;
+        }
         !mounts.is_empty()
             && mounts.iter().all(|m| {
                 pb::RenameProbeStatus::try_from(m.rename_probe)
@@ -699,8 +715,16 @@ impl pb::agent_service_server::AgentService for AgentSession {
         let mounts_json = serde_json::to_string(&capability.mounts)
             .map_err(|e| Status::internal(format!("mounts not serialisable: {e}")))?;
 
-        let commit_eligible = Self::commit_eligible(&mounts);
-        let rename_probe_status = if commit_eligible { "ok" } else { "untested" };
+        let commit_eligible = Self::commit_eligible(capability.transport, &mounts);
+        // The probe verdict still describes the *mounts*, so a streaming agent
+        // reports "untested" while being commit eligible. That is not a
+        // contradiction: it has no mounts to have probed, and it is not the
+        // party that installs.
+        let rename_probe_status = if Self::commit_eligible(TransportMode::Mount, &mounts) {
+            "ok"
+        } else {
+            "untested"
+        };
 
         let hash_changed = known.is_some()
             && self
