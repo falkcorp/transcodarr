@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/push_output.rs
-// version: 1.0.0
+// version: 1.0.1
 // guid: 4d21f6b8-9c07-4e35-a1d2-6b8f0e7a3c94
 // last-edited: 2026-08-16
 //! `PushOutput`: the server installing on a streaming agent's behalf.
@@ -587,10 +587,19 @@ async fn a_source_that_changed_since_it_was_planned_is_not_overwritten() {
         replaced,
         "the newer file must survive"
     );
-    assert_ne!(
+    // Not `assert_ne!(Succeeded)`. `Committing -> Failed` is a legal edge, so
+    // the job must actually arrive at `Failed`; a job wedged in `Committing`
+    // because the transition silently no-opped would satisfy "not Succeeded"
+    // while leaving the row stuck forever. Name the state you expect.
+    assert_eq!(
         h.job_state("j1"),
-        JobState::Succeeded,
-        "a refused install is not a success"
+        JobState::Failed,
+        "a refused install must finish the job, not abandon it mid-commit"
+    );
+    assert_eq!(
+        h.intent_state("j1"),
+        Some(("resolved".into(), Some("source_intact".into()))),
+        "the ledger must release the destination and say why nothing landed"
     );
 }
 

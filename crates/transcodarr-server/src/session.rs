@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/session.rs
-// version: 1.5.0
+// version: 1.5.1
 // guid: 5c81a3e7-24b6-4f09-8d15-7a6c03e29b48
 // last-edited: 2026-08-16
 //! Registration and the agent stream: the server side of the transport.
@@ -452,7 +452,12 @@ impl pb::agent_service_server::AgentService for AgentSession {
             attempt: first.attempt,
             fencing_epoch: u64::try_from(epoch).unwrap_or(u64::MAX),
         };
-        let (granted, reason, trash_path) = self.judge_commit(&agent_id, epoch, &ask)?;
+        // The trash path this judgement computes is deliberately dropped. It is
+        // only meaningful alongside the grant that produced it, and the grant
+        // that governs the install is the one taken *after* the transfer.
+        // Keeping this one alive would give `trash_path` two possible origins
+        // depending on which branch reached the ritual.
+        let (granted, reason, _) = self.judge_commit(&agent_id, epoch, &ask)?;
         if !granted {
             tracing::warn!(agent = %agent_id, job = %job_id, %reason, "push refused before transfer");
             return Ok(Response::new(refused(reason)));
@@ -506,10 +511,7 @@ impl pb::agent_service_server::AgentService for AgentSession {
             let _ = std::fs::remove_file(&temp);
             return Err(e);
         }
-        let (still_granted, reason, trash_path) = match self.judge_commit(&agent_id, epoch, &ask)? {
-            (true, _, t) => (true, String::new(), t),
-            (false, why, _) => (false, why, trash_path),
-        };
+        let (still_granted, reason, trash_path) = self.judge_commit(&agent_id, epoch, &ask)?;
         if !still_granted {
             let _ = std::fs::remove_file(&temp);
             tracing::warn!(agent = %agent_id, job = %job_id, %reason,
