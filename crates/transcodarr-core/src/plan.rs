@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/plan.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 7e2b4c98-1d05-4a37-92f6-c8b30e1a5d64
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 //! Encoder identities, pixel formats, and ffmpeg argv construction.
 //!
 //! `build_ffmpeg_argv` is the single source of the command line. The dry-run
@@ -9,6 +9,8 @@
 //! command while a different one runs.
 
 use std::path::PathBuf;
+
+use crate::capability::{Platform, TransportMode};
 
 use serde::{Deserialize, Serialize};
 
@@ -165,6 +167,98 @@ pub struct JobPaths {
     pub input: PathBuf,
     /// Destination file to write.
     pub output: PathBuf,
+}
+
+/// What the server knows about where one agent can reach files.
+///
+/// The three fields [`agent_job_paths`] needs, pulled out so the resolver does
+/// not take a whole `Capability` and become impossible to call from a test.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentView<'a> {
+    /// How this agent gets at the media.
+    pub transport: TransportMode,
+    /// Which separator its paths use. `None` is treated as the server's own.
+    pub platform: Option<Platform>,
+    /// Absolute path to the agent's work area, in the agent's namespace.
+    pub workarea_path: &'a str,
+}
+
+/// Translate one job's locations into the paths a given agent will see.
+///
+/// **This is the only place a path crosses from the server's namespace into an
+/// agent's.** `argv` is composed server-side and executed verbatim, and
+/// `JobStarted` echoes it back for an equality check, so the translation has to
+/// happen before `build_ffmpeg_argv` rather than anywhere downstream of it.
+/// Putting it here also means the mount table's
+/// `canonical_prefix` -> `local_path` rewrite — designed but never implemented,
+/// and currently masked because every mount-mode run so far has been same-host
+/// — has exactly one obvious home when it is written, instead of becoming a
+/// second translator that can disagree with this one.
+///
+/// Under [`TransportMode::Stream`] the agent cannot resolve a canonical path at
+/// all, so both ends are named inside its own work area: it fetches the source
+/// to `input` and writes its encode to `output`, and the server moves the bytes
+/// in both directions.
+pub fn agent_job_paths(
+    view: &AgentView<'_>,
+    job_id: &str,
+    attempt: i64,
+    canonical_source: &std::path::Path,
+    server_temp: &std::path::Path,
+) -> JobPaths {
+    if view.transport != TransportMode::Stream {
+        // Today's behaviour, unchanged. A mount-mode agent resolves the
+        // canonical path through its own mount table, which is why it is
+        // required to advertise one covering the prefix.
+        return JobPaths {
+            input: canonical_source.to_path_buf(),
+            output: server_temp.to_path_buf(),
+        };
+    }
+
+    let ext = canonical_source
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mkv".to_string());
+    let stem = format!("{}.{attempt}", sanitise_component(job_id));
+    JobPaths {
+        input: join_for(view, &format!("{stem}.src.{ext}")),
+        output: join_for(view, &format!("{stem}.partial.{ext}")),
+    }
+}
+
+/// Join a file name onto the agent's work area using *that agent's* separator.
+///
+/// `Path::join` would use the server's, and the server is Linux while the only
+/// streaming agent so far is Windows. ffmpeg would cope with the mixed result,
+/// but `job_attempt.argv_json` is persisted so an operator can paste it into a
+/// shell on that machine, and a path that merely happens to work is not the
+/// same promise.
+fn join_for(view: &AgentView<'_>, name: &str) -> PathBuf {
+    let root = view.workarea_path.trim_end_matches(['/', '\\']);
+    let sep = match view.platform {
+        Some(Platform::Windows) => '\\',
+        Some(Platform::Linux) => '/',
+        None => std::path::MAIN_SEPARATOR,
+    };
+    PathBuf::from(format!("{root}{sep}{name}"))
+}
+
+/// Reduce an identifier to characters every filesystem here accepts.
+///
+/// The same rule the server's own `temp_path_for` and the agent's `WorkArea`
+/// apply. A job id is operator- and scanner-derived, so it is not trusted to be
+/// a safe path component.
+fn sanitise_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// A fully-decided encode, ready to be turned into an ffmpeg command line.
@@ -354,5 +448,135 @@ mod tests {
     fn format_command_quotes_paths_with_spaces() {
         let s = format_command("ffmpeg", &["-i".into(), "/m/My Show/ep 1.mkv".into()]);
         assert_eq!(s, "ffmpeg -i '/m/My Show/ep 1.mkv'");
+    }
+}
+
+#[cfg(test)]
+mod agent_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    const CANON: &str = "/mnt/tv/Show/S01E01.mkv";
+    const SERVER_TEMP: &str = "/mnt/tv/.work/u1.j1.0.partial.mkv";
+
+    fn view(transport: TransportMode, platform: Option<Platform>, root: &str) -> AgentView<'_> {
+        AgentView {
+            transport,
+            platform,
+            workarea_path: root,
+        }
+    }
+
+    /// The whole point of the mount transport is that the agent resolves the
+    /// canonical path itself. Translating it would break the mode that works.
+    #[test]
+    fn a_mount_agent_still_gets_the_canonical_path() {
+        let v = view(TransportMode::Mount, Some(Platform::Linux), "/var/work");
+        let p = agent_job_paths(&v, "j1", 0, Path::new(CANON), Path::new(SERVER_TEMP));
+        assert_eq!(p.input, Path::new(CANON));
+        assert_eq!(p.output, Path::new(SERVER_TEMP));
+    }
+
+    /// A streaming agent cannot open the library at all, so neither end of the
+    /// job may name it.
+    #[test]
+    fn a_streaming_agent_gets_both_ends_inside_its_own_work_area() {
+        let v = view(TransportMode::Stream, Some(Platform::Linux), "/var/work");
+        let p = agent_job_paths(&v, "j1", 0, Path::new(CANON), Path::new(SERVER_TEMP));
+
+        assert_eq!(p.input, Path::new("/var/work/j1.0.src.mkv"));
+        assert_eq!(p.output, Path::new("/var/work/j1.0.partial.mkv"));
+        for got in [&p.input, &p.output] {
+            let s = got.display().to_string();
+            assert!(
+                !s.contains("/mnt/tv"),
+                "a streaming agent must never be handed a library path: {s}"
+            );
+        }
+    }
+
+    /// The server is Linux and the only streaming agent so far is Windows, so
+    /// `Path::join` would pick the wrong separator. `argv` is persisted for an
+    /// operator to paste into a shell on *that* machine.
+    #[test]
+    fn a_windows_agent_gets_windows_separators() {
+        let v = view(
+            TransportMode::Stream,
+            Some(Platform::Windows),
+            r"C:\Users\jdfalk\work",
+        );
+        let p = agent_job_paths(&v, "j1", 2, Path::new(CANON), Path::new(SERVER_TEMP));
+
+        assert_eq!(
+            p.input.display().to_string(),
+            r"C:\Users\jdfalk\work\j1.2.src.mkv"
+        );
+        assert!(
+            !p.output.display().to_string().contains('/'),
+            "a mixed-separator path merely happens to work"
+        );
+    }
+
+    /// A trailing separator on the advertised root must not double up: the
+    /// resulting path still has to be pasteable.
+    #[test]
+    fn a_trailing_separator_on_the_root_is_not_doubled() {
+        for root in ["/var/work/", r"C:\work\"] {
+            let plat = if root.starts_with('C') {
+                Platform::Windows
+            } else {
+                Platform::Linux
+            };
+            let v = view(TransportMode::Stream, Some(plat), root);
+            let p = agent_job_paths(&v, "j1", 0, Path::new(CANON), Path::new(SERVER_TEMP));
+            let s = p.input.display().to_string();
+            assert!(!s.contains("//") && !s.contains(r"\\"), "{s}");
+        }
+    }
+
+    /// Attempts land in different files, or a retry overwrites the staging of
+    /// the attempt it is retrying.
+    #[test]
+    fn each_attempt_gets_its_own_file() {
+        let v = view(TransportMode::Stream, Some(Platform::Linux), "/var/work");
+        let a = agent_job_paths(&v, "j1", 0, Path::new(CANON), Path::new(SERVER_TEMP));
+        let b = agent_job_paths(&v, "j1", 1, Path::new(CANON), Path::new(SERVER_TEMP));
+        assert_ne!(a.input, b.input);
+        assert_ne!(a.output, b.output);
+    }
+
+    /// A job id is scanner- and operator-derived. It is not trusted to be a
+    /// safe path component, and a `..` in one must not escape the work area.
+    #[test]
+    fn a_hostile_job_id_cannot_escape_the_work_area() {
+        let v = view(TransportMode::Stream, Some(Platform::Linux), "/var/work");
+        let p = agent_job_paths(
+            &v,
+            "../../etc/cron.d/x",
+            0,
+            Path::new(CANON),
+            Path::new(SERVER_TEMP),
+        );
+        assert!(
+            p.input.starts_with("/var/work"),
+            "escaped the work area: {}",
+            p.input.display()
+        );
+        assert!(!p.input.display().to_string().contains(".."));
+    }
+
+    /// The input keeps the source's container. Handing ffmpeg a `.mkv` named
+    /// `.bin` is a demux that fails for a reason nobody will connect to this.
+    #[test]
+    fn the_fetched_source_keeps_the_source_extension() {
+        let v = view(TransportMode::Stream, Some(Platform::Linux), "/var/work");
+        let p = agent_job_paths(
+            &v,
+            "j1",
+            0,
+            Path::new("/mnt/tv/ep.mp4"),
+            Path::new(SERVER_TEMP),
+        );
+        assert!(p.input.display().to_string().ends_with(".src.mp4"));
     }
 }

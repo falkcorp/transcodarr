@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/orchestrator.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 74b2e9c0-3a58-4f16-9d47-0e85b3c21fa6
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! The loop: queue in, assignments out, and the ledger kept honest.
 //!
 //! Every part this drives already existed and had no caller — `Dispatcher`,
@@ -40,10 +40,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use transcodarr_core::capability::{Capability, Requirements};
+use transcodarr_core::capability::{Capability, Requirements, TransportMode};
 use transcodarr_core::failure::FailureClass;
 use transcodarr_core::job::JobState;
-use transcodarr_core::plan::JobPaths;
 use transcodarr_core::policy::{self, Policy};
 use transcodarr_proto::pb;
 use transcodarr_store::repo::{
@@ -401,10 +400,33 @@ impl Orchestrator {
 
         let source = std::path::PathBuf::from(&file.canonical_path);
         let temp = temp_path_for(&library.work_dir, agent_id, &job.id, job.attempt, &source);
-        let paths = JobPaths {
-            input: source.clone(),
-            output: temp.clone(),
+
+        // Read from the registry rather than the fleet table: `Connected`
+        // carries only the epoch and the outbound channel, and what is needed
+        // here is where this particular agent can reach files.
+        let capability = self.agent_capability(agent_id, &file.canonical_path)?;
+        let view = transcodarr_core::plan::AgentView {
+            transport: capability.transport,
+            platform: capability.platform,
+            workarea_path: &capability.workarea_path,
         };
+
+        // Refused rather than defaulted. An empty work area root would join to
+        // `/{job}.{attempt}.src.mkv` — the filesystem root — and the failure
+        // would surface as an unreadable input three steps later, on the agent,
+        // in an ffmpeg error.
+        if view.transport == TransportMode::Stream && view.workarea_path.is_empty() {
+            return Err(ServerError::ProbeFailed {
+                path: file.canonical_path.clone(),
+                reason: format!(
+                    "{agent_id} streams but advertises no work area path; \
+                     it is too old to be sent translated argv"
+                ),
+            });
+        }
+
+        let paths =
+            transcodarr_core::plan::agent_job_paths(&view, &job.id, job.attempt, &source, &temp);
         let argv = transcodarr_core::plan::build_ffmpeg_argv(&plan, &paths);
         let spec = policy::validation_spec_for(&facts, &decision);
 
@@ -454,9 +476,19 @@ impl Orchestrator {
             job_id: job.id.clone(),
             attempt: u32::try_from(job.attempt).unwrap_or(0),
             fencing_epoch: u64::try_from(epoch).unwrap_or(0),
-            source_path: file.canonical_path.clone(),
+            // Both are the agent's own view, matching the `argv` above. Under
+            // `Stream` these name its work area, not the library.
+            //
+            // `source_path` is deliberately not left canonical with the local
+            // path added alongside it: `LocalWorker::judge` re-measures the
+            // source's duration through this same field, so a second field
+            // would leave that call reading a path the agent cannot open and
+            // reporting it as a failed validation. One field, one meaning —
+            // "where the input is, from your perspective". The canonical path
+            // is in the ledger row, which is where the install needs it.
+            source_path: paths.input.display().to_string(),
+            temp_path: paths.output.display().to_string(),
             final_path: file.canonical_path.clone(),
-            temp_path: temp.display().to_string(),
             argv,
             validation_spec_json: serde_json::to_string(&spec).unwrap_or_default(),
             expected_content_sig: job.expected_content_sig.clone(),
@@ -685,6 +717,34 @@ impl Orchestrator {
 ///
 /// Named with the agent in it so two agents cannot pick the same path, and with
 /// the destination's extension because ffmpeg chooses its muxer from it.
+impl Orchestrator {
+    /// The capability document this agent registered with.
+    ///
+    /// Parsed rather than defaulted on failure. The capability decides which
+    /// namespace `argv` is written in, and an agent whose document will not
+    /// parse would otherwise be sent mount-mode paths by default — which is
+    /// precisely the case where a streaming agent gets a canonical path it
+    /// cannot open.
+    fn agent_capability(
+        &self,
+        agent_id: &str,
+        for_path: &str,
+    ) -> Result<transcodarr_core::capability::Capability, ServerError> {
+        let record = self
+            .agents
+            .get(agent_id)
+            .map_err(ServerError::from)?
+            .ok_or_else(|| ServerError::ProbeFailed {
+                path: for_path.to_string(),
+                reason: format!("{agent_id} is not registered"),
+            })?;
+        serde_json::from_str(&record.capability_json).map_err(|e| ServerError::ProbeFailed {
+            path: for_path.to_string(),
+            reason: format!("{agent_id} has an unreadable capability document: {e}"),
+        })
+    }
+}
+
 fn temp_path_for(
     work_dir: &str,
     agent_id: &str,

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/capability.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 3f81c5d9-2a64-4e07-b93a-6c05d81ef742
-// last-edited: 2026-08-10
+// last-edited: 2026-08-16
 //! What an agent can do, what a job needs, and whether they match.
 //!
 //! This is the fix for the failure mode that motivated the whole project: a job
@@ -164,6 +164,15 @@ pub struct Capability {
     pub platform: Option<Platform>,
     /// Free bytes in the agent's work area at probe time.
     pub workarea_free_bytes: u64,
+    /// Absolute path to that work area, in the agent's own namespace.
+    ///
+    /// The server translates `argv` into it for a [`TransportMode::Stream`]
+    /// agent, which has no mount table to translate through and so has nothing
+    /// else the server could name. Defaulted for the same reason `transport`
+    /// is: an agent that predates the field advertises none, and a mount-mode
+    /// agent never needs one.
+    #[serde(default)]
+    pub workarea_path: String,
     /// Arbitrary operator labels, e.g. `rack=1`.
     pub labels: Vec<(String, String)>,
 }
@@ -241,6 +250,7 @@ mod transport_tests {
             mounts: Vec::new(),
             platform: Some(Platform::Windows),
             workarea_free_bytes: 1 << 40,
+            workarea_path: String::new(),
             labels: Vec::new(),
         }
     }
@@ -525,6 +535,7 @@ mod tests {
             }],
             platform: Some(Platform::Windows),
             workarea_free_bytes: 500_000_000_000,
+            workarea_path: String::new(),
             labels: vec![],
         }
     }

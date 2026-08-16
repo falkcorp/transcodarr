@@ -1,7 +1,7 @@
 // file: crates/transcodarr-proto/src/convert.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 6d92f108-4b73-4a15-8c2e-01fb7d3a6592
-// last-edited: 2026-08-10
+// last-edited: 2026-08-16
 //! The boundary between generated types and domain types.
 //!
 //! Everything here exists to stop one class of bug: a value this build does not
@@ -373,6 +373,7 @@ impl TryFrom<pb::Capability> for Capability {
             mounts: v.mounts.into_iter().map(Mount::from).collect(),
             platform,
             workarea_free_bytes: v.workarea_free_bytes,
+            workarea_path: v.workarea_path,
             labels: v.labels.into_iter().collect(),
         })
     }
@@ -421,6 +422,7 @@ impl TryFrom<Capability> for pb::Capability {
                 .collect::<Result<Vec<_>, _>>()?,
             mounts: v.mounts.into_iter().map(pb::Mount::from).collect(),
             workarea_free_bytes: v.workarea_free_bytes,
+            workarea_path: v.workarea_path,
             capability_hash,
             labels: v.labels.into_iter().collect(),
             ..Default::default()
@@ -611,6 +613,7 @@ mod tests {
             }],
             platform: Some(Platform::Linux),
             workarea_free_bytes: 1 << 40,
+            workarea_path: String::new(),
             labels: vec![("rack".into(), "1".into())],
         };
         let wire = pb::Capability::try_from(core.clone()).unwrap();

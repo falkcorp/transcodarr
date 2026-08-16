@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.3.0
+// version: 1.3.1
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
-// last-edited: 2026-08-10
+// last-edited: 2026-08-16
 //! The rules engine, and `Default Space Saver`.
 //!
 //! Rules are an ordered list of typed `when`/`then` entries evaluated
@@ -755,6 +755,7 @@ mod tests {
             }],
             platform: Some(Platform::Windows),
             workarea_free_bytes: u64::MAX,
+            workarea_path: String::new(),
             labels: vec![],
         };
         assert!(
