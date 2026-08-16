@@ -1,7 +1,7 @@
 // file: crates/transcodarr-proto/proto/transcodarr/v1/agent.proto
-// version: 1.0.0
+// version: 1.1.0
 // guid: 8d4b1e07-62fa-4c53-9018-3b7e0a25c964
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 //
 // The wire contract. Checked in ahead of codegen on purpose: this file is the
 // agreement between server and agent, and it is worth reviewing as a contract
@@ -159,6 +159,20 @@ message Capability {
   // A TM_STREAM agent advertises no mounts and is dispatched work whose
   // canonical paths it cannot see, because it never resolves them.
   TransportMode transport        = 16;
+  // Absolute path to this agent's work area, in this agent's own namespace.
+  //
+  // The server needs a name for somewhere on the agent because `argv` is
+  // "fully translated, agent-local" (see JobAssignment.argv) and the server is
+  // the only party allowed to compose it. Under TM_STREAM there is no mount
+  // table to translate through, so without this the server has nothing to put
+  // in `-i` that the agent could open.
+  //
+  // Not a substitution token in `argv`. `JobStarted` echoes argv back and it
+  // must equal what was sent, and `job_attempt.argv_json` is persisted so an
+  // operator can paste it into a shell on that agent and reproduce the run
+  // byte-for-byte. Both guarantees die the moment argv contains a placeholder
+  // only the agent can expand.
+  string   workarea_path         = 17;
 }
 
 // Replayed from the fsynced IntentJournal BEFORE the agent accepts any work.

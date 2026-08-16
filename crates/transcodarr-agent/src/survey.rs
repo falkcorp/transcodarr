@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/survey.rs
-// version: 1.2.0
+// version: 1.3.0
 // guid: 3d92b0a7-5c14-4b86-9e02-7fa3b1d6485c
-// last-edited: 2026-08-10
+// last-edited: 2026-08-16
 //! What this machine can actually do, as a capability document.
 //!
 //! Every value here is *measured*, never assumed, and the difference matters at
@@ -113,6 +113,11 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
             .collect(),
         platform: platform(),
         workarea_free_bytes: free_bytes(Path::new(&config.work_dir)),
+        // The same directory the free-space figure above is measured against,
+        // now named rather than only sized. Under `TM_STREAM` the server
+        // translates `argv` into this path, so a wrong one is not a bad
+        // estimate — it is an `-i` the agent cannot open.
+        workarea_path: config.work_dir.clone(),
         labels: config.labels.clone(),
     };
 
