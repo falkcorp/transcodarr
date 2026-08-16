@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/tests/dispatch_loop.rs
-// version: 1.2.0
+// version: 1.4.0
 // guid: b2d704e9-5c81-4a36-97f0-1e648d3c5b02
 // last-edited: 2026-08-16
 //! The loop under conditions the single-job proof cannot reach.
@@ -10,7 +10,9 @@
 //! - a job the reconciler returns to the queue must be dispatched *again*;
 //! - a job that keeps failing must stop, rather than cycle forever;
 //! - more jobs than slots must be capped by the ledger, not handed out;
-//! - a paused schedule must place nothing at all.
+//! - a paused schedule must place nothing at all;
+//! - and whatever stopped a job must be readable afterwards, from the
+//!   database, by an operator who was not watching the tick that decided it.
 //!
 //! No media and no encoding: the agents here are fleet-table entries, and what
 //! is under test is the placement decision, not the work. Anything needing
@@ -29,7 +31,8 @@ use transcodarr_server::orchestrator::Orchestrator;
 use transcodarr_server::schedule::ScheduleEngine;
 use transcodarr_store::WriteLane;
 use transcodarr_store::repo::{
-    AgentRegistration, AgentRepo, FileRepo, FileUpsert, JobRepo, LibraryRecord, LibraryRepo, NewJob,
+    AgentRegistration, AgentRepo, DispatchBlockRepo, FileRepo, FileUpsert, JobRepo, LibraryRecord,
+    LibraryRepo, NewJob,
 };
 
 /// A harness with a store, a fleet table, and a loop over both.
@@ -388,6 +391,142 @@ async fn placement_is_capped_by_the_per_agent_limit() {
     assert!(
         again.dispatched.is_empty(),
         "the ledger should be full: {again:?}"
+    );
+}
+
+/// Why a job stayed put must outlive the tick that decided it.
+///
+/// `dispatch.rs` says outright that "nothing is running and I do not know why"
+/// is the question `dispatch_block` exists to answer — and nothing wrote to it,
+/// so the answer lived only in a `debug!` line that had already scrolled past.
+/// The reason has to be readable afterwards, from the database, by an operator
+/// who was not watching.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_job_records_why_where_an_operator_can_read_it() {
+    let h = Harness::new();
+    let orchestrator = h.orchestrator(AgentLimits::flat(1, 1));
+    let _a = h.add_agent("u1");
+    h.add_job("job-0");
+    h.add_job("job-1");
+
+    let outcome = orchestrator.tick().await.unwrap();
+    assert_eq!(
+        outcome.dispatched.len(),
+        1,
+        "one slot, one job: {outcome:?}"
+    );
+    let stuck = outcome.blocked[0].0.clone();
+
+    let blocks = DispatchBlockRepo::new(h.runtime.pool().clone());
+    let row = blocks
+        .get(&stuck)
+        .unwrap()
+        .expect("the blocked job should have a row saying why");
+    assert_eq!(row.blocking_stage, "capacity");
+    // Not just the category. The stage says "capacity"; the sentence says which
+    // agent and which limit, which is the part that ends the investigation.
+    let reason = row.reason().expect("the detail should survive the column");
+    assert!(
+        reason.contains("u1") && reason.contains("limit"),
+        "detail should name the agent and its limit, got: {reason}"
+    );
+
+    // And the job that *did* dispatch is not recorded as stuck.
+    assert!(blocks.get(&outcome.dispatched[0]).unwrap().is_none());
+}
+
+/// A stale block says a job is stuck when it is running — the sort of thing an
+/// operator acts on. Dispatching has to retract the earlier reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatching_clears_the_reason_recorded_when_it_was_blocked() {
+    let h = Harness::new();
+    let _a = h.add_agent("u1");
+    h.add_job("job-0");
+    h.add_job("job-1");
+
+    let stuck = {
+        let tight = h.orchestrator(AgentLimits::flat(1, 1));
+        let outcome = tight.tick().await.unwrap();
+        outcome.blocked[0].0.clone()
+    };
+
+    let blocks = DispatchBlockRepo::new(h.runtime.pool().clone());
+    assert!(blocks.get(&stuck).unwrap().is_some(), "precondition");
+
+    // Same fleet, more room: the ledger is rebuilt from the database each tick,
+    // so the held slot is counted and the second job now fits beside it.
+    let roomy = h.orchestrator(AgentLimits::flat(4, 1));
+    let outcome = roomy.tick().await.unwrap();
+    assert!(
+        outcome.dispatched.contains(&stuck),
+        "the job should place now: {outcome:?}"
+    );
+    assert!(
+        blocks.get(&stuck).unwrap().is_none(),
+        "a dispatched job must not still be reported as blocked"
+    );
+}
+
+/// The commonest form of "nothing is running and I do not know why": a full
+/// queue and no agent connected.
+///
+/// The tick used to return the moment the fleet was empty, before it had even
+/// looked at the queue, so the case an operator is most likely to be staring at
+/// was the one case the reasons table said nothing about.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_fleet_is_recorded_against_every_waiting_job() {
+    let h = Harness::new();
+    let orchestrator = h.orchestrator(AgentLimits::flat(4, 1));
+    h.add_job("job-0");
+    h.add_job("job-1");
+    // Deliberately no agent.
+
+    let outcome = orchestrator.tick().await.unwrap();
+    assert!(outcome.dispatched.is_empty());
+    assert_eq!(outcome.blocked.len(), 2, "{outcome:?}");
+
+    let blocks = DispatchBlockRepo::new(h.runtime.pool().clone());
+    for job in ["job-0", "job-1"] {
+        let row = blocks
+            .get(job)
+            .unwrap()
+            .expect("every waiting job needs a reason");
+        assert_eq!(row.blocking_stage, "fleet");
+        assert!(
+            row.reason().unwrap().contains("no agent is connected"),
+            "{:?}",
+            row.reason()
+        );
+    }
+}
+
+/// A pause has to say *which* rule paused it. `EffectiveLimits::source` exists
+/// for exactly that, and an operator told only "paused" is left reading the
+/// schedule config to work out which entry to edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_schedule_records_the_rule_that_stopped_the_work() {
+    let h = Harness::new();
+    let orchestrator =
+        h.orchestrator(AgentLimits::flat(4, 1))
+            .with_schedule(ScheduleEngine::paused_until(
+                i64::MAX,
+                "an operator stopped the fleet",
+            ));
+    let _rx = h.add_agent("u1");
+    h.add_job("job-1");
+
+    let outcome = orchestrator.tick().await.unwrap();
+    assert_eq!(outcome.blocked, vec![("job-1".to_string(), "schedule")]);
+
+    let row = DispatchBlockRepo::new(h.runtime.pool().clone())
+        .get("job-1")
+        .unwrap()
+        .expect("a paused fleet still owes an explanation");
+    assert_eq!(row.blocking_stage, "schedule");
+    let reason = row.reason().unwrap();
+    assert!(
+        reason.contains("an operator stopped the fleet"),
+        "the pause reason should name the rule, got: {reason}"
     );
 }
 

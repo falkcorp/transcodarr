@@ -1,5 +1,5 @@
 // file: crates/transcodarr-server/src/orchestrator.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: 74b2e9c0-3a58-4f16-9d47-0e85b3c21fa6
 // last-edited: 2026-08-16
 //! The loop: queue in, assignments out, and the ledger kept honest.
@@ -46,7 +46,8 @@ use transcodarr_core::job::JobState;
 use transcodarr_core::policy::{self, Policy};
 use transcodarr_proto::pb;
 use transcodarr_store::repo::{
-    AgentRepo, CommitIntentRepo, FileRepo, JobRecord, JobRepo, LibraryRepo, NewIntent,
+    AgentRepo, CommitIntentRepo, DispatchBlock, DispatchBlockRepo, FileRepo, JobRecord, JobRepo,
+    LibraryRepo, NewIntent,
 };
 use transcodarr_store::{ReadPool, WriteLane, Writer};
 
@@ -203,8 +204,24 @@ impl Orchestrator {
         let mut outcome = TickOutcome::default();
         self.reconcile(&mut outcome)?;
 
+        // Read before the fleet is consulted, because a queue that cannot move
+        // still has to be able to say why. The two conditions below stop every
+        // job at once, and they are the two an operator is most likely to be
+        // staring at, so returning from them without a word is how "nothing is
+        // running and I do not know why" stays unanswered.
+        let mut pending = Vec::new();
+        for state in DISPATCHABLE_STATES {
+            pending.extend(self.jobs.in_state(state, QUEUE_WINDOW)?);
+        }
+
         let agents = self.fleet_view()?;
         if agents.is_empty() {
+            self.block_every(
+                &mut outcome,
+                &pending,
+                "fleet",
+                "no agent is connected to this server",
+            );
             return Ok(outcome);
         }
         self.rebuild_capacity(&agents)?;
@@ -213,15 +230,17 @@ impl Orchestrator {
         // nothing new", never "stop what is running" -- cancelling mid-encode
         // throws the work away and can interrupt a commit, which is the one
         // moment where stopping is genuinely dangerous.
-        if self.is_paused(&agents) {
-            tracing::debug!("dispatch is paused by the schedule");
+        if let Some(source) = self.pause_reason(&agents) {
+            tracing::debug!(%source, "dispatch is paused by the schedule");
+            self.block_every(
+                &mut outcome,
+                &pending,
+                "schedule",
+                &format!("dispatch is paused by {source}"),
+            );
             return Ok(outcome);
         }
 
-        let mut pending = Vec::new();
-        for state in DISPATCHABLE_STATES {
-            pending.extend(self.jobs.in_state(state, QUEUE_WINDOW)?);
-        }
         if pending.is_empty() {
             return Ok(outcome);
         }
@@ -240,6 +259,19 @@ impl Orchestrator {
                 .push((blocked.job_id.clone(), blocked.stage));
             tracing::debug!(job = %blocked.job_id, stage = blocked.stage, detail = %blocked.detail,
                 "job did not dispatch");
+
+            // Persisted, not merely logged at `debug`. `dispatch.rs` states
+            // that "nothing is running and I do not know why" is the question
+            // this table exists to answer — and it had no writer, so the answer
+            // was only ever available to whoever thought to restart the server
+            // with a debug filter and catch the next tick. The cost is real:
+            // a GPU node sat blocked for an hour because the requirement it
+            // failed was visible nowhere an operator would look.
+            self.write_best_effort(DispatchBlockRepo::upsert_op(
+                blocked.job_id.clone(),
+                blocked.stage.to_string(),
+                Some(DispatchBlock::detail_for(&blocked.detail)),
+            ));
         }
 
         for assignment in &round.assignments {
@@ -247,7 +279,12 @@ impl Orchestrator {
                 continue;
             };
             match self.place(job, &assignment.agent_id).await {
-                Ok(()) => outcome.dispatched.push(job.id.clone()),
+                Ok(()) => {
+                    // A stale block says a job is stuck when it is running,
+                    // which is exactly the sort of thing an operator acts on.
+                    self.write_best_effort(DispatchBlockRepo::clear_op(job.id.clone()));
+                    outcome.dispatched.push(job.id.clone());
+                }
                 Err(e) => {
                     // The permit is handed back, or a job that failed to leave
                     // the building holds a slot until the process restarts.
@@ -616,6 +653,47 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Record one fleet-wide reason against every job the queue is holding.
+    ///
+    /// The dispatcher's own stages — capability, capacity — are per job, and it
+    /// reports them one at a time. These two are not: no agent connected, and a
+    /// schedule that paused everything, stop the whole window at once, and the
+    /// dispatcher never runs to report them. Written per job anyway, because
+    /// `explain` is asked about a *file* and has no fleet of its own to consult.
+    ///
+    /// One blocking submit per job, as the per-job path already does. At
+    /// [`QUEUE_WINDOW`] that is a few hundred WAL writes against a five second
+    /// tick, which is cheap next to an operator who cannot tell a stopped fleet
+    /// from a broken one.
+    fn block_every(
+        &self,
+        outcome: &mut TickOutcome,
+        pending: &[JobRecord],
+        stage: &'static str,
+        reason: &str,
+    ) {
+        let detail = DispatchBlock::detail_for(reason);
+        for job in pending {
+            outcome.blocked.push((job.id.clone(), stage));
+            self.write_best_effort(DispatchBlockRepo::upsert_op(
+                job.id.clone(),
+                stage.to_string(),
+                Some(detail.clone()),
+            ));
+        }
+    }
+
+    /// A write whose failure must not take the tick down with it.
+    ///
+    /// For bookkeeping that exists to *explain* the system rather than to run
+    /// it: losing a dispatch-block record costs an operator a clue, while
+    /// failing the tick over it costs the queue.
+    fn write_best_effort(&self, op: transcodarr_store::writer::WriteOp) {
+        if let Err(e) = self.writer.submit_blocking(WriteLane::Normal, op) {
+            tracing::warn!(error = %e, "a bookkeeping write failed; continuing");
+        }
+    }
+
     /// Free destinations reserved by intents nothing will ever resolve.
     ///
     /// ## What wedges, and why it is worse than a leak
@@ -768,27 +846,42 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Whether the schedule says to place nothing right now.
+    /// What the schedule says is stopping the fleet, if anything.
     ///
     /// Paused when *no* agent has a slot. A window that zeroes one agent still
     /// leaves the fleet working, and treating that as a fleet-wide pause would
     /// stop everyone because one node was quietened.
-    fn is_paused(&self, agents: &[AgentEntry]) -> bool {
+    ///
+    /// Returns the deciding window or override rather than a bare `bool`:
+    /// `EffectiveLimits::source` exists precisely so an operator can be told
+    /// *which* rule stopped the work, and "paused" without it leaves them
+    /// reading the schedule config to guess. Distinct sources are all listed —
+    /// different agents can be silenced by different rules, and naming one of
+    /// them would send the operator to edit the wrong entry.
+    fn pause_reason(&self, agents: &[AgentEntry]) -> Option<String> {
         let now = now_unix();
         let (weekday, minute) = ScheduleEngine::clock(now);
         let per_class = std::collections::HashMap::new();
-        agents.iter().all(|a| {
-            self.schedule
-                .effective(
-                    &a.id,
-                    self.limits.total_slots,
-                    &per_class,
-                    weekday,
-                    minute,
-                    now,
-                )
-                .is_paused()
-        })
+        let mut sources: Vec<String> = Vec::new();
+        for a in agents {
+            let limits = self.schedule.effective(
+                &a.id,
+                self.limits.total_slots,
+                &per_class,
+                weekday,
+                minute,
+                now,
+            );
+            if !limits.is_paused() {
+                return None;
+            }
+            if !sources.contains(&limits.source) {
+                sources.push(limits.source);
+            }
+        }
+        // An empty fleet is handled before this is asked, and would otherwise
+        // report itself as paused by nothing at all.
+        (!sources.is_empty()).then(|| sources.join(", "))
     }
 
     /// When an agent's lease runs out, if it has one.
