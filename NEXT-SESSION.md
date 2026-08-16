@@ -1,13 +1,17 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.7.0 -->
+<!-- version: 3.8.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
 # Goal: a real transcode on the GPU node, both transports, audio and video
 
-**Still not achieved.** No transcode has run on the GPU node (`windows-rtx2070`, 172.16.3.22) by either method. What
-changed on 2026-08-12 is that two of the three blockers are gone, and the third
-is now precisely scoped rather than mysterious.
+**Audio over `TM_STREAM` is done — 2026-08-16.** `windows-rtx2070`
+(172.16.3.22) fetched a 10s FLAC source from the Mac, transcoded it to EAC3,
+pushed it back, and the server installed it: duration exactly `10.000000`,
+original retained in trash, the node's work area swept clean.
+
+What is left of the goal: **video with `hevc_nvenc`**, and **mount mode**, which
+still needs hands on the box.
 
 ## Done 2026-08-12
 
@@ -173,7 +177,51 @@ or byte ranges.
    per job forever, pre-existing in mount mode and only visible because a
    streaming work area is swept and that was what was left sitting in it.
 
-5. **Then `windows-rtx2070`:** stream-mode audio, then video with `hevc_nvenc`. ← **you are here.** The binary already cross-builds and its survey ran on the box; what is new is that the transport it needs now works.
+5. **`windows-rtx2070` stream-mode audio** — **done 2026-08-16 (PR #87)**.
+   Video with `hevc_nvenc` is what remains. Use an **8-bit H.264 source** and
+   software decode; the Turing traps below are unchanged and untested by this.
+
+   **Two bugs stood between the merged code and a working node, and neither was
+   in the transport.** Both are the same shape: a thing that looked configured
+   and did nothing.
+
+   - **`AgentClass::Cpu` on every audio job.** An audio pass is `-c:v copy`, but
+     an agent offers `Cpu` only when it has libx264/libx265. That ffmpeg build
+     has no libx264, so the node advertised `[Audio, Gpu]` and was ineligible
+     for the audio work it was built to take. `AgentClass::Audio` was generated
+     by every agent and **required by no job at all** — check for that shape;
+     a capability nothing asks for is usually a mismatch, not a spare.
+   - **`tracing_subscriber_init()` was an empty function.** The standalone agent
+     binary discarded every log event, so the node ran blind for three attempts
+     while the same library logged fine under the CLI. **When a remote process
+     produces no output, suspect the logger before the logic.**
+
+   Two operational notes that cost real time:
+
+   - **`timeout N ssh ...` does not kill the remote process.** Three orphaned
+     agents accumulated and kept reconnecting, which is what produced a fleet of
+     spurious registrations (epoch 44) and a `scp` that failed with the target
+     file in use. `taskkill /F /IM transcodarr-agent.exe` between runs.
+   - **`set VAR=value && cmd` in cmd.exe assigns `"value "`** — the space before
+     `&&` is part of the value, so `RUST_LOG` silently matches nothing. Write
+     `set "VAR=value" && cmd`.
+
+   The recipe that works, from the Mac:
+
+   ```sh
+   # server must bind the LAN, not loopback
+   transcodarr serve --db t.db --listen 0.0.0.0:7420 --tick-seconds 3
+   ssh windows-gpu 'set "RUST_LOG=info" && C:\Users\jdfalk\transcodarr-agent.exe connect ^
+     --server http://172.16.3.222:7420 --id win-rtx2070 ^
+     --work-dir C:\Users\jdfalk\tc-work --transport stream ^
+     --ffmpeg C:\Users\jdfal\bin\ffmpeg.exe --ffprobe C:\Users\jdfal\bin\ffprobe.exe'
+   ```
+
+   System `sqlite3` on the Mac is too old for this schema's `STRICT` tables
+   (`malformed database schema`). Python's bundled sqlite is 3.53 and reads it
+   fine — useful for `job.requirements_json`, which is what exposed the first
+   bug.
+
 6. **Mount mode last** — see below, it needs hands on the box.
 
 ## Mount mode needs the owner at the console

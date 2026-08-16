@@ -1922,6 +1922,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "transcodarr-core",
  "transcodarr-proto",
 ]
