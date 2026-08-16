@@ -1,7 +1,7 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.0.2 -->
+<!-- version: 3.1.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
-<!-- last-edited: 2026-08-12 -->
+<!-- last-edited: 2026-08-16 -->
 
 # Goal: a real transcode on the GPU node, both transports, audio and video
 
@@ -79,10 +79,13 @@ or byte ranges.
 
 ## What is left, in order
 
-1. **Wire the RPCs.** `AgentSession::fetch_source` / `push_output` still return
-   `unimplemented`. `fetch_source` is small: check the epoch the way
-   `CommitReport` does, look the job's source path up, hand it to
-   `transfer::source_stream`.
+1. ~~**Wire `fetch_source`.**~~ **Done** (PR #81). It serves a held job's source
+   through `transfer::source_stream`, behind three gates: epoch against the
+   registry, the job row naming this caller at this epoch, and `HELD_STATES`.
+   The third is not redundant — `transition_op` changes only `state` and leaves
+   `agent_id`/`fencing_epoch` in place, so a failed job still names its last
+   holder, and only a new `boot_id` bumps an epoch. Without it the agent that
+   just failed a job could pull its source forever.
 2. **Server-side install for `push_output`.** Receive into a staging path with
    `transfer::Sink`, then follow `runner.rs:281–350` *literally*, including the
    ordering the comments there defend: `CommitIntentRepo::grant_op` **before**
@@ -126,6 +129,19 @@ credentials in whatever session resolves it).
   today: that ffmpeg lists `av1_nvenc` and the hardware cannot do it.
 - That ffmpeg build has **no libx264** — no software video fallback on the box.
 - ICMP is filtered on `windows-rtx2070`. `ping` failing proves nothing; test port 22.
+- **The agent must `stamp()` its fetch requests.** `client.rs` stamps
+  `x-agent-id`/`x-agent-epoch` only at the `connect()` call site. `fetch_source`
+  reads identity from that same metadata and refuses without it, so an unstamped
+  fetch gets an opaque `Unauthenticated`. The two epochs — metadata and request
+  body — must also agree, which they do trivially when both come from `stamp()`.
+- **An in-stream error is fatal, not end-of-stream.** `transfer::source_stream`
+  reports a missing source as a `Status::not_found` *inside* the stream
+  (`transfer.rs:63`). A reader that treats stream errors as termination turns a
+  missing source into a zero-byte fetch — and a blake3 of nothing verifies fine.
+- **`req.attempt` is not checked against `job.attempt`.** Harmless for
+  `fetch_source`, where every attempt reads the same source path, so a mislabeled
+  chunk still carries correct bytes. **Not** harmless for `push_output`, which
+  will key staging and the intent grant on `(job_id, attempt)` — check it there.
 - The `FakeServer` in `connect_client.rs` refuses to serve bytes on purpose.
   Do not weaken it to make a streaming test pass — a fake that returned an empty
   stream would let a streaming test pass while moving no bytes.
