@@ -1,7 +1,7 @@
 // file: crates/transcodarr-proto/src/lib.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: 7c3d90ab-1e58-42f6-b704-8a15de26903c
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! The agent protocol: message shapes, the version gate, and conversions.
@@ -31,6 +31,7 @@
 pub mod convert;
 pub mod handshake;
 pub mod message;
+pub mod transfer;
 
 /// The generated types, exactly as `tonic-build` emits them.
 ///

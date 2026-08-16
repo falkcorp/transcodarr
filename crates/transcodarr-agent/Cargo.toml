@@ -1,7 +1,7 @@
 # file: crates/transcodarr-agent/Cargo.toml
-# version: 1.2.0
+# version: 1.3.0
 # guid: e6b09d41-7a52-4c38-91fe-04d7b3a86152
-# last-edited: 2026-08-06
+# last-edited: 2026-08-16
 
 [package]
 name = "transcodarr-agent"
@@ -33,4 +33,7 @@ transcodarr-proto = { path = "../transcodarr-proto" }
 clap = { workspace = true }
 
 [dev-dependencies]
+# For the streaming fixture, which must compute the same whole-file
+# signature the real server does.
+blake3 = { workspace = true }
 tempfile = { workspace = true }

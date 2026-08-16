@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.9.0
+// version: 1.10.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! transcodarr orchestration.
@@ -31,7 +31,6 @@ pub mod schedule;
 pub mod serve;
 pub mod session;
 pub mod summary;
-pub mod transfer;
 
 pub use capacity::{AgentLimits, CapacityLedger, Grant, Refusal};
 pub use dispatch::{AgentEntry, Assignment, Blocked, DispatchRound, Dispatcher, QueuedJob};

@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/worker.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 8c1f37d5-4b0a-49e6-a2f8-13d70b6e5a94
-// last-edited: 2026-08-06
+// last-edited: 2026-08-16
 //! The real [`Worker`]: an assignment in, an installed file or a reason out.
 //!
 //! Everything here already existed and was only reachable through `admin run`.
@@ -152,6 +152,11 @@ impl LocalWorker {
     /// job in the running set, releasing it however this ends — cannot be
     /// skipped by an early return.
     async fn execute(&self, a: &pb::JobAssignment, link: &Link) {
+        if self.streams() {
+            self.execute_streaming(a, link).await;
+            return;
+        }
+
         let temp = PathBuf::from(&a.temp_path);
         let final_path = PathBuf::from(&a.final_path);
         let attempt = i64::from(a.attempt);
@@ -259,6 +264,114 @@ impl LocalWorker {
             &detail_of(&resolution),
         )
         .await;
+    }
+
+    /// Whether this agent reaches media by streaming rather than by mount.
+    fn streams(&self) -> bool {
+        self.capability.transport == pb::TransportMode::TmStream as i32
+    }
+
+    /// The same job, for an agent that cannot see the library.
+    ///
+    /// ## What is absent, and why none of it is an oversight
+    ///
+    /// - **No `ensure_same_device` and no `SourceGuard::observe`.** Both stat
+    ///   `final_path`, which under streaming is a canonical path in the
+    ///   *server's* namespace — an identifier here, not a location. The server
+    ///   builds the guard from its own stored file row instead, inside
+    ///   `push_output`, where it can actually see the file.
+    /// - **No `request_commit` and no [`CommitRitual`].** The server installs,
+    ///   so the grant and the journal both live where the install happens.
+    ///   Asking permission here and acting on it there would put the fence and
+    ///   the act on opposite sides of a network.
+    /// - **Therefore no journal entry, and `live_intents()` stays empty
+    ///   structurally** — the ritual is the only production writer of it, and
+    ///   this path never runs the ritual.
+    ///
+    /// Both ends of the job are agent-local paths the server composed for this
+    /// agent (`core::plan::agent_job_paths`), so `argv` and [`Self::judge`]
+    /// already point at them and neither needs rewriting here.
+    async fn execute_streaming(&self, a: &pb::JobAssignment, link: &Link) {
+        let temp = PathBuf::from(&a.temp_path);
+        let source = PathBuf::from(&a.source_path);
+        let attempt = i64::from(a.attempt);
+
+        // Removes both ends whatever happens below. A fetched source is a
+        // whole copy of the original: leaving one behind per failed job fills
+        // the work area, and the next fetch then fails for lack of room on a
+        // machine that looks idle.
+        let sweep = || {
+            let _ = std::fs::remove_file(&temp);
+            let _ = std::fs::remove_file(&source);
+        };
+
+        match link.fetch_source(&a.job_id, attempt, &source).await {
+            Ok(bytes) => {
+                tracing::info!(job = %a.job_id, bytes, path = %source.display(), "source fetched")
+            }
+            Err(e) => {
+                tracing::error!(job = %a.job_id, error = %e, "could not fetch the source");
+                sweep();
+                link.result(failed_result(&a.job_id, attempt, &e.to_string()))
+                    .await;
+                return;
+            }
+        }
+
+        let execution = match self.encode(a, &temp, link).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!(job = %a.job_id, error = %e, "encode failed to run");
+                sweep();
+                link.result(failed_result(&a.job_id, attempt, &e.to_string()))
+                    .await;
+                return;
+            }
+        };
+
+        let report = self.judge(a, &temp, execution.exit_code);
+        link.result(pb::JobResult {
+            job_id: a.job_id.clone(),
+            attempt: a.attempt,
+            exit_code: execution.exit_code,
+            signal: execution.signal.unwrap_or(0),
+            stderr_tail: execution.stderr_tail.clone(),
+            validation_json: serde_json::to_string(&report).unwrap_or_default(),
+            output_bytes: execution.output_bytes,
+        })
+        .await;
+
+        if !report.passed {
+            tracing::warn!(job = %a.job_id, detail = %report.detail, "output rejected");
+            sweep();
+            return;
+        }
+
+        if self.is_revoked(&a.job_id) {
+            tracing::warn!(job = %a.job_id, "revoked during the encode; not pushing");
+            sweep();
+            return;
+        }
+
+        // The push *is* the commit request: the server judges, stages, installs
+        // and records the outcome in one call. Nothing is reported afterwards,
+        // because the server already transitioned the job — a `CommitReport`
+        // here would be a second verdict on one outcome.
+        match link.push_output(&a.job_id, attempt, &temp).await {
+            Ok(response) if response.accepted => {
+                tracing::info!(job = %a.job_id, bytes = response.bytes_received, "output installed");
+            }
+            Ok(response) => {
+                // A refusal is an answer, not a fault. The server left the
+                // destination alone and said why.
+                tracing::warn!(job = %a.job_id, reason = %response.reason, "the server refused the push");
+            }
+            Err(e) => {
+                tracing::error!(job = %a.job_id, error = %e, "the push failed");
+            }
+        }
+
+        sweep();
     }
 
     /// Run ffmpeg, forwarding progress up the stream as it goes.
