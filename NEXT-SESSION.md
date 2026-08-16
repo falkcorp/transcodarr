@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.6.0 -->
+<!-- version: 3.7.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -148,17 +148,32 @@ or byte ranges.
    test machine. Point it at a file that happens to exist locally — the obvious
    thing to do on a single-machine fixture — and a streaming agent silently
    taking the mount path passes.
-4. **Prove it locally before Windows.** ← **you are here** Server and agent both on the Mac, agent
-   `--transport stream`, a real audio transcode end to end.
+4. ~~**Prove it locally before Windows.**~~ **Done 2026-08-16 (PR #86).** Server
+   and agent both on the Mac, `--transport stream`, a real 6s FLAC→EAC3 pass:
+   fetched 101,377 bytes, encoded, pushed 512,116 back, server installed it.
+   Library file replaced, duration exactly 6.000000s, original retained in
+   trash, both work areas swept.
 
-   **Partly discharged by PR #84.** `stream_transport.rs`'s
-   `a_streaming_agent_fetches_encodes_and_pushes_real_media` runs real ffmpeg
-   over the real transport: fetch, remux, push, verify the landed file by
-   probing its duration. What it does **not** exercise is the real server —
-   its fixture stubs the database and the commit ritual, so nothing here proves
-   the ledger, the intent, or the install. Run the two real binaries against
-   each other before believing this works.
-5. **Then `windows-rtx2070`:** stream-mode audio, then video with `hevc_nvenc`.
+   **It did not work the first time, and what stopped it is the lesson of this
+   whole file.** The agent registered, and every tick logged
+   `dispatched=0 blocked=1` forever. `commit_eligible` required
+   `!mounts.is_empty()` — and a `TM_STREAM` agent advertises **no mounts by
+   design**, which `agent.proto` says outright. So it was permanently
+   ineligible, and `Dispatcher::place` skips an ineligible agent as a candidate
+   outright. **Every streaming agent was undispatchable, and the entire
+   transport built over PRs #81–#84 was unreachable in production.**
+
+   573 tests passed over it. They could not have caught it: every dispatch test
+   registers agents through a harness that sets `commit_eligible: true`
+   directly, bypassing the rule. **A fixture that asserts the precondition it
+   exists to exercise cannot fail on it.** Check what your harness hardcodes
+   before trusting what it proves.
+
+   The `-progress` sink leak came out of the same run — `<temp>.progress`, one
+   per job forever, pre-existing in mount mode and only visible because a
+   streaming work area is swept and that was what was left sitting in it.
+
+5. **Then `windows-rtx2070`:** stream-mode audio, then video with `hevc_nvenc`. ← **you are here.** The binary already cross-builds and its survey ran on the box; what is new is that the transport it needs now works.
 6. **Mount mode last** — see below, it needs hands on the box.
 
 ## Mount mode needs the owner at the console

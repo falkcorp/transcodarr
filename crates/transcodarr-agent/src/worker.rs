@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/worker.rs
-// version: 1.2.0
+// version: 1.2.1
 // guid: 8c1f37d5-4b0a-49e6-a2f8-13d70b6e5a94
 // last-edited: 2026-08-16
 //! The real [`Worker`]: an assignment in, an installed file or a reason out.
@@ -404,7 +404,7 @@ impl LocalWorker {
         let job_id = a.job_id.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            executor.run_argv(&argv, &temp, &progress_path, |p| {
+            let execution = executor.run_argv(&argv, &temp, &progress_path, |p| {
                 let _ = tx.try_send(pb::JobProgress {
                     job_id: String::new(),
                     out_time_us: p.out_time_us,
@@ -412,7 +412,14 @@ impl LocalWorker {
                     speed: p.speed.clone().unwrap_or_default(),
                     total_size: p.total_size,
                 });
-            })
+            });
+            // ffmpeg's `-progress` sink, removed by whoever created it. Nothing
+            // downstream cleans it up: a successful mount-mode install *renames*
+            // the temp file away and a failure removes it, and neither has ever
+            // known about this sibling. One per job, forever, in a directory
+            // that otherwise looks empty.
+            let _ = std::fs::remove_file(&progress_path);
+            execution
         })
         .await;
 
