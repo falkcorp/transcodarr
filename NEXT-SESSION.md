@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.11.0 -->
+<!-- version: 3.12.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -200,9 +200,32 @@ or byte ranges.
    per job forever, pre-existing in mount mode and only visible because a
    streaming work area is swept and that was what was left sitting in it.
 
-5. **`windows-rtx2070` stream-mode audio** — **done 2026-08-16 (PR #87)**.
-   Video with `hevc_nvenc` is what remains. Use an **8-bit H.264 source** and
-   software decode; the Turing traps below are unchanged and untested by this.
+5. **`windows-rtx2070` stream mode** — **done. Audio 2026-08-16 (PR #87),
+   video 2026-08-16 (PR #89).**
+
+   Both video paths now run end to end, server on the Mac, `--transport
+   stream`, verified on **frame counts rather than file size** — a decode that
+   stops early still writes a smaller, structurally valid file, so size cannot
+   tell success from truncation:
+
+   | path | job | source → output | frames | encoder in the bitstream |
+   |---|---|---|---|---|
+   | GPU (this node) | `VideoGpu` | h264 `High` 20.2 Mbps → hevc `Main` 2.4 Mbps | 627 → 627 | `Lavc63.8.101 hevc_nvenc` |
+   | CPU (Mac) | `VideoCpu` | av1 `Main` 1.2 Mbps → hevc `Main` 0.7 Mbps | 240 → 240 | `Lavc62.28.102 libx265` |
+
+   The stream-level `encoder` tag is the witness worth using: libx265 stamps
+   its build into an SEI and NVENC does not, so it corroborates the logs
+   instead of restating them. Durations matched to the microsecond and the
+   originals landed in trash.
+
+   **Both artifacts were stale when I first ran this, and both lied
+   convincingly.** The deployed `transcodarr-agent.exe` predated the
+   trial-decode commit by two hours, and `target/release/transcodarr`
+   predated the policy change by one — so the first CPU run printed a
+   requirement carrying `profile: "Main"` and looked like a logic bug in code
+   that was in fact correct. 606 tests said nothing about either, because
+   tests do not know which binary you deployed. **Check artifact mtimes
+   against the commit before believing a run.**
 
    ### What blocked video — resolved 2026-08-16
 
@@ -251,6 +274,14 @@ or byte ranges.
    agent start re-runs the trials. That costs ~1s once the clips exist, since
    `ensure` reuses them — measured 1.36s cold, 0.59s warm. Also deferred, per
    plan: `ReprobeCapabilities`, `fingerprint_watch`, `ArcSwap` swapping.
+
+   **The deferral is cheaper than it looks, and the reason is worth writing
+   down before someone re-derives it.** `run::prepare` surveys exactly once,
+   before `client.run()`; the reconnect-and-backoff loop lives *inside*
+   `client.run()` and reuses the capability it was handed. So the trials cost
+   one survey per **process start**, not per reconnect — which matters
+   precisely because this node has previously sat in a reconnect loop. Whole
+   registration on it, trials included, measured ~2.5s.
 
    **Two bugs stood between the merged code and a working node, and neither was
    in the transport.** Both are the same shape: a thing that looked configured
