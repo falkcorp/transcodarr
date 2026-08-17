@@ -1,7 +1,7 @@
 <!-- file: changelog.d/20260817-gpu-jobs-ask-for-software-decode.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 4f2ab8d1-93c7-4e60-b5a2-7c1e0d64f8b3 -->
-<!-- last-edited: 2026-08-16 -->
+<!-- last-edited: 2026-08-17 -->
 
 ### Changed
 
@@ -34,6 +34,18 @@ node: a 10-bit `High 10` source blocked at `capability` —
 frames of `hevc_nvenc` at 248 fps with the duration preserved. `h264
 High 4:2:2` and `av1 Main` were refused the same way, for the same reason. All
 three dispatch now.
+
+**This reaches jobs created after the upgrade, and only those.** A job's
+requirements are serialised at creation and nothing rewrites them: `admin
+evaluate` reports `evaluated 0` because `rules_version` hashes the policy
+*config*, which this change does not touch, and `evaluate_one` returns
+`already_busy` before it would recompute the spec anyway. A `Pending` job
+created by an earlier binary therefore keeps its `Nvdec` requirement and blocks
+permanently, naming a requirement no installed code can emit. There is no
+cancel or requeue command, so the only recourse is editing the row by hand.
+Tracked as `REQ-REFRESH`; it is a pre-existing property of how requirements are
+stored, not something introduced here, but this is the first change to make it
+bite.
 
 This was only ever reachable once `decoders` stopped being empty: before that
 every video job blocked regardless, so an over-constraint was invisible.

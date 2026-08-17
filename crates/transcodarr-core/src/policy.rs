@@ -1,7 +1,7 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.6.0
+// version: 1.6.1
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
-// last-edited: 2026-08-16
+// last-edited: 2026-08-17
 //! The rules engine, and `Default Space Saver`.
 //!
 //! Rules are an ordered list of typed `when`/`then` entries evaluated
@@ -864,22 +864,37 @@ mod tests {
             f.video_profile = Some(profile.to_string());
             let d = evaluate(&f, &default_space_saver());
             let Some(job) = next_job(&d, &f, &SizeThresholds::default()) else {
-                continue;
+                panic!("{codec} {profile} produced no job, so this case tests nothing");
             };
-            for r in &job.requirements.0 {
-                if let Requirement::Decoder(t) = r {
-                    assert_eq!(
-                        t.kind,
-                        DecoderKind::Software,
-                        "{codec} {profile} asked for a hardware decode the plan never performs"
-                    );
-                    assert_eq!(
-                        t.profile, "",
-                        "{codec} {profile} keyed the triple on a profile, so any agent that \
-                         did not happen to trial it would refuse the job"
-                    );
-                }
-            }
+
+            // Counted rather than iterated over: a `for` loop that finds no
+            // decode requirement asserts nothing and still passes, which would
+            // make this guard survive deleting the very requirement it exists
+            // to constrain.
+            let decoders: Vec<&DecoderTriple> = job
+                .requirements
+                .0
+                .iter()
+                .filter_map(|r| match r {
+                    Requirement::Decoder(t) => Some(t),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                decoders.len(),
+                1,
+                "{codec} {profile} must ask for exactly one decode path, got {decoders:?}"
+            );
+            assert_eq!(
+                decoders[0].kind,
+                DecoderKind::Software,
+                "{codec} {profile} asked for a hardware decode the plan never performs"
+            );
+            assert_eq!(
+                decoders[0].profile, "",
+                "{codec} {profile} keyed the triple on a profile, so any agent that \
+                 did not happen to trial it would refuse the job"
+            );
         }
     }
 
