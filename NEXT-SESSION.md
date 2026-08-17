@@ -1,7 +1,7 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.12.0 -->
+<!-- version: 3.13.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
-<!-- last-edited: 2026-08-16 -->
+<!-- last-edited: 2026-08-17 -->
 
 # Goal: a real transcode on the GPU node, both transports, audio and video
 
@@ -441,6 +441,22 @@ fleet to contend for the destination — but it is real.
 - The `FakeServer` in `connect_client.rs` refuses to serve bytes on purpose.
   Do not weaken it to make a streaming test pass — a fake that returned an empty
   stream would let a streaming test pass while moving no bytes.
+- **`if let` inside a `for` over a requirement list asserts nothing when the
+  list is empty.** The guard added with the `Software` decode requirement
+  iterated `job.requirements.0` and asserted inside
+  `if let Requirement::Decoder(t)`; deleting the `reqs.push` it exists to
+  protect left it green. Count the matches and assert the count, then assert on
+  the element. Same family as the attempt-`0` trap above: **mutation-test any
+  guard whose subject might simply be absent.**
+- **A job's requirements are frozen at creation and no command refreshes
+  them.** So a *code* change that alters what `next_job` emits reaches new jobs
+  only. `rules_version` hashes the policy config, not the code, so `needs_eval`
+  never resurfaces the file (`admin evaluate` → `evaluated 0`); and
+  `evaluate_one` returns `already_busy` before `next_job` runs, so forcing it
+  would not help either. There is no cancel/requeue subcommand. Verified on a
+  pre-change database: the job still names `kind: Nvdec` under a binary that
+  cannot emit it. Filed as `REQ-REFRESH`. **When changing emitted requirements,
+  test the upgrade path on an old database, not only a fresh one.**
 
 ## The rule that keeps being right
 
