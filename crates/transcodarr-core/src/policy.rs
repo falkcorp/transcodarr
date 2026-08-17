@@ -1,5 +1,5 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.5.0
+// version: 1.6.0
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
 // last-edited: 2026-08-16
 //! The rules engine, and `Default Space Saver`.
@@ -546,38 +546,47 @@ pub fn next_job(d: &Decision, facts: &FileFacts, t: &SizeThresholds) -> Option<J
                 Requirement::Muxer(ContainerId::Matroska),
             ];
 
-            // A hardware *encoder* implies nothing about the decoder. Asking for
-            // the decode path explicitly is what keeps AV1 and Hi10 off the
-            // Turing card: the requirement fails to match rather than the job
-            // failing at runtime with a truncated output.
+            // The decode requirement describes the decode this job actually
+            // performs, which is a software one on both paths.
             //
-            // The profile is asked for on the hardware path only, and this
-            // asymmetry is measured rather than tidy. On Turing NVDEC, at a
-            // fixed codec and bit depth, `Constrained Baseline`, `Main` and
-            // `High` H.264 all decode in hardware while `High 4:2:2` and
-            // `High 4:4:4 Predictive` silently fall back to the CPU — so the
-            // profile carries a verdict that codec and depth do not, and
-            // dropping it would advertise a decoder this card does not have.
-            // Software decode has no such distinction: ffmpeg either has the
-            // decoder compiled in or it does not, which is what `-decoders`
-            // already answered. Keying the software triple on the profile too
-            // would mean every profile nobody thought to trial — `Main` is the
-            // common one, and it is not in any candidate list — went `Untested`
-            // and blocked the *CPU* path as well, for no safety in return.
+            // This used to ask for `Nvdec` whenever the encoder was a hardware
+            // one, on the stated grounds that "a hardware encoder implies
+            // nothing about the decoder, which is the gap Hi10 falls through".
+            // That reasoning is sound and the requirement was still wrong,
+            // because it described a pipeline that does not exist:
+            // `plan::build_ffmpeg_argv_raw` emits `-i <input>` immediately
+            // before `-c:v` and appends its `extra` arguments *after* the codec
+            // flags, and `-hwaccel` is an input option that must precede `-i`.
+            // The builder cannot express one. Every GPU job software-decodes
+            // and NVENC-encodes.
+            //
+            // So the NVDEC requirement was strictly stricter than the work, and
+            // fail-closed matching turned that into refusing jobs the card
+            // demonstrably completes. Measured on a Turing node 2026-08-16: a
+            // 10-bit `High 10` source blocked at `capability`, while that job's
+            // exact argv run by hand finished 300 frames of `hevc_nvenc` at 248
+            // fps. `High 4:2:2` and `av1` were refused the same way.
+            //
+            // The agent still trials NVDEC and still reports per-profile
+            // verdicts — they are worth having, and `survey` prints them,
+            // because the profile carries a verdict that codec and depth do
+            // not: at a fixed codec and depth, `Constrained Baseline`, `Main`
+            // and `High` H.264 decode in hardware on that card while
+            // `High 4:2:2` and `High 4:4:4 Predictive` silently fall back. They
+            // become dispatch-relevant the moment the plan builder can ask for
+            // a hardware decode. Until then, requiring them buys nothing.
+            //
+            // The profile is left empty because software decode does not vary
+            // by it: ffmpeg either has the decoder compiled in or it does not.
+            // Naming it would mean every profile nobody thought to trial —
+            // `Main` is the common one, and it is in no candidate list — went
+            // `Untested` and blocked the job, for no safety in return.
             if let Some(codec) = &facts.video_codec {
                 reqs.push(Requirement::Decoder(DecoderTriple {
                     codec: codec.clone(),
-                    profile: if gpu {
-                        facts.video_profile.clone().unwrap_or_default()
-                    } else {
-                        String::new()
-                    },
+                    profile: String::new(),
                     bit_depth: plan.source_depth,
-                    kind: if gpu {
-                        DecoderKind::Nvdec
-                    } else {
-                        DecoderKind::Software
-                    },
+                    kind: DecoderKind::Software,
                 }));
             }
 
@@ -798,19 +807,80 @@ mod tests {
         );
     }
 
-    /// A video job asks for its decode path explicitly. A hardware encoder
-    /// implies nothing about the decoder, which is the gap Hi10 falls through.
+    /// A video job asks for the decode it performs, which is a software one
+    /// even when the encoder is NVENC.
+    ///
+    /// `build_ffmpeg_argv_raw` cannot emit `-hwaccel` — it is an input option
+    /// and the builder puts nothing before `-i` — so requiring `Nvdec` here
+    /// described a pipeline that does not run, and fail-closed matching turned
+    /// that into refusing work the card completes.
     #[test]
-    fn a_gpu_video_job_requires_a_verified_hardware_decode() {
+    fn a_gpu_video_job_requires_the_software_decode_it_actually_performs() {
         let f = facts("h264", BitDepth::Eight, &["aac"], 8_000_000);
         let d = evaluate(&f, &default_space_saver());
         let job = next_job(&d, &f, &SizeThresholds::default()).unwrap();
+
+        // The encoder is what makes this job a GPU job.
         assert!(
             job.requirements
                 .0
                 .iter()
-                .any(|r| matches!(r, Requirement::Decoder(t) if t.kind == DecoderKind::Nvdec))
+                .any(|r| matches!(r, Requirement::AgentClass(AgentClass::Gpu))),
+            "the job should still be a GPU job: {:?}",
+            job.requirements.0
         );
+
+        let decoders: Vec<&DecoderTriple> = job
+            .requirements
+            .0
+            .iter()
+            .filter_map(|r| match r {
+                Requirement::Decoder(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decoders.len(), 1, "exactly one decode path is asked for");
+        assert_eq!(decoders[0].kind, DecoderKind::Software);
+        assert_eq!(
+            decoders[0].profile, "",
+            "software decode does not vary by profile"
+        );
+    }
+
+    /// The profiles NVDEC silently falls back on must not block a GPU job.
+    ///
+    /// These are the three the Turing node refused before the requirement was
+    /// corrected: `High 4:2:2` and `High 10` trial as `VerifiedSoftFallback`
+    /// and `av1` as `VerifiedFail`, yet each transcodes fine, because nothing
+    /// in the job asks NVDEC to decode anything.
+    #[test]
+    fn a_profile_nvdec_cannot_handle_still_yields_a_satisfiable_requirement() {
+        for (codec, profile, depth) in [
+            ("h264", "High 4:2:2", BitDepth::Eight),
+            ("h264", "High 10", BitDepth::Ten),
+            ("av1", "Main", BitDepth::Eight),
+        ] {
+            let mut f = facts(codec, depth, &["aac"], 8_000_000);
+            f.video_profile = Some(profile.to_string());
+            let d = evaluate(&f, &default_space_saver());
+            let Some(job) = next_job(&d, &f, &SizeThresholds::default()) else {
+                continue;
+            };
+            for r in &job.requirements.0 {
+                if let Requirement::Decoder(t) = r {
+                    assert_eq!(
+                        t.kind,
+                        DecoderKind::Software,
+                        "{codec} {profile} asked for a hardware decode the plan never performs"
+                    );
+                    assert_eq!(
+                        t.profile, "",
+                        "{codec} {profile} keyed the triple on a profile, so any agent that \
+                         did not happen to trial it would refuse the job"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

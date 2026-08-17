@@ -1,5 +1,5 @@
 <!-- file: changelog.d/20260816-trial-decodes-populate-decoders.md -->
-<!-- version: 1.2.0 -->
+<!-- version: 1.3.0 -->
 <!-- guid: bc57d73f-fa30-4536-bb8a-521980160fb8 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -68,36 +68,6 @@ because a soft fallback decodes every frame — on the CPU.
 
 A card that soft-falls-back is identical to a working one everywhere else in
 that output.
-
-#### Known limitation: a `VideoGpu` job requires NVDEC but does not use it
-
-`build_ffmpeg_argv_raw` (`plan.rs:302`) goes from `-i <input>` straight to
-`-c:v`, and its `extra` arguments are appended *after* the codec flags —
-`-hwaccel` is an input option and must precede `-i`, so the builder cannot
-express one at all. Every `VideoGpu` job therefore **decodes in software and
-encodes on NVENC**, while `policy.rs` requires a `VerifiedOk` NVDEC triple for
-it.
-
-That requirement is deliberate — the test at `policy.rs:804` says "a hardware
-encoder implies nothing about the decoder, which is the gap Hi10 falls
-through" — but it describes a full NVDEC→NVENC pipeline the plan builder never
-grew. Populating `decoders` is what makes the divergence bite: previously every
-video job blocked regardless, so an over-constraint was invisible.
-
-Measured, not inferred. A 10-bit `High 10` source blocks:
-
-    no enabled, commit-eligible agent satisfies AgentClass(Gpu)
-      + Encoder(HevcNvenc) + Muxer(Matroska)
-      + Decoder(DecoderTriple { codec: "h264", profile: "High 10",
-                                bit_depth: Ten, kind: Nvdec })
-
-while that job's exact pipeline, run by hand on the same node, succeeds — 300
-frames in and out, duration preserved, `Lavc63.8.101 hevc_nvenc`, 248 fps. The
-three triples affected are `h264 High 4:2:2` and `h264 High 10` (both
-`VerifiedSoftFallback`) and `av1 Main` (`VerifiedFail`).
-
-Until this is resolved the verdict table is **not** dispatch-authoritative for
-the GPU path: it is stricter than the work performed.
 
 ### Fixed
 

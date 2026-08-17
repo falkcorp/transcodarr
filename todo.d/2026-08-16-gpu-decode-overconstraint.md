@@ -1,38 +1,35 @@
-- [ ] **GPU-NVDEC** Reconcile the `VideoGpu` decode requirement with the
-      pipeline that actually runs — right now a GPU job requires a `VerifiedOk`
-      NVDEC triple but never asks NVDEC to do anything. `build_ffmpeg_argv_raw`
-      (`plan.rs:302`) emits `-i <input>` immediately before `-c:v`, and its
-      `extra` arguments land *after* the codec flags, so an `-hwaccel` — an
-      input option, which must precede `-i` — cannot be expressed by the
-      builder at all. Every `VideoGpu` job therefore software-decodes and
+- [ ] **GPU-NVDEC** Teach the plan builder to request a hardware decode, so the
+      NVDEC verdicts the agent already measures become load-bearing.
+      `build_ffmpeg_argv_raw` (`plan.rs:302`) emits `-i <input>` immediately
+      before `-c:v` and appends its `extra` arguments *after* the codec flags.
+      `-hwaccel` is an input option and must precede `-i`, so the builder
+      cannot express one at all — every `VideoGpu` job software-decodes and
       NVENC-encodes.
 
-      Measured on `windows-rtx2070` 2026-08-16: a 10-bit `High 10` source
-      blocks at `capability` on
-      `Decoder(DecoderTriple { codec: "h264", profile: "High 10", bit_depth: Ten, kind: Nvdec })`,
-      while that job's exact pipeline run by hand on the same node succeeds —
-      300 frames in and out, duration preserved, `Lavc63.8.101 hevc_nvenc`,
-      248 fps. Affected: `h264 High 4:2:2` and `h264 High 10`
-      (`VerifiedSoftFallback`) and `av1 Main` (`VerifiedFail`).
+      The over-constraint this caused is already fixed: the decode requirement
+      now says `Software` with an empty profile, matching the work performed,
+      which unblocked `h264 High 4:2:2`, `h264 High 10` and `av1 Main` on the
+      Turing node. What remains is the *other* half — making the pipeline live
+      up to the original intent at `policy.rs`, that "a hardware encoder
+      implies nothing about the decoder, which is the gap Hi10 falls through."
 
-      Two defensible resolutions, and they are not equivalent:
+      Needs, in order:
 
-      1. **Make the requirement describe the work.** Emit the decoder
-         requirement as `kind: Software` for GPU jobs too, leaving GPU-ness to
-         `AgentClass(Gpu)` + `Encoder(HevcNvenc)`. Smallest change, unblocks
-         Hi10 and 4:2:2 immediately, and demotes the NVDEC verdicts to
-         reporting until a hardware decode path exists.
-      2. **Make the work match the requirement.** Teach the plan builder to
-         place input options before `-i` and emit
-         `-hwaccel cuda -hwaccel_output_format cuda` for GPU plans. This is
-         what `policy.rs:804` intends ("a hardware encoder implies nothing
-         about the decoder, which is the gap Hi10 falls through") and it makes
-         the soft-fallback verdicts genuinely load-bearing — but it needs
-         pix_fmt rework, since frames then stay in device memory and `p010le`
-         is a system-memory format.
+      1. An input-options slot in the argv builder, before `-i`. Everything
+         today goes after it, so this is a structural change to the builder
+         rather than another `extra`.
+      2. `-hwaccel cuda -hwaccel_output_format cuda` on GPU plans, gated on the
+         agent's trial verdict for that exact triple rather than on the class —
+         `VerifiedSoftFallback` must *not* take the hardware path, because it
+         silently decodes on the CPU while looking like a success.
+      3. pix_fmt rework. Frames then stay in device memory and `p010le` is a
+         system-memory format, so the current `pix_fmt_for` mapping
+         (`policy.rs:276`) does not apply unchanged; a `format=cuda` filter or
+         an explicit `hwdownload` is needed depending on the filter chain.
+      4. Restore a decode requirement that names `Nvdec` and the real profile
+         for plans that take the hardware path — the shape reverted here, but
+         emitted only when the plan actually asks for `-hwaccel`.
 
-      Until one is chosen, the verdict table is **not** dispatch-authoritative
-      for the GPU path: it is strictly stricter than the work performed. This
-      is pre-existing, not introduced by the trial-decode change — but that
-      change is what made it bite, because previously every video job blocked
-      regardless and an over-constraint was invisible.
+      Worth doing for throughput, not correctness: software decode of 1080p
+      h264 feeding NVENC already ran at 248 fps on that card, so this is not
+      urgent.
