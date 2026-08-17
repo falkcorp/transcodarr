@@ -1,7 +1,7 @@
 // file: crates/transcodarr-agent/src/journal.rs
-// version: 1.0.0
+// version: 1.0.1
 // guid: 3a6f81d4-2c95-4e78-b013-9f57ac2e6b80
-// last-edited: 2026-08-03
+// last-edited: 2026-08-16
 //! The intent journal: what the agent was about to do, written before it did it.
 //!
 //! The commit ritual moves a file through states no single system call can make
@@ -19,7 +19,7 @@
 //! `write()` plus `fsync()` on the file leaves the *directory entry* unsynced,
 //! so after a power loss the journal can be a file that does not exist.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -252,9 +252,15 @@ pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     // Opening a directory read-only and syncing it is the portable-enough way
     // to flush its entries; on Windows this is not meaningful, and the agent
     // there is produce-only for related reasons.
+    //
+    // `File` is named in full rather than imported at the top of the module,
+    // because this is its only use and it sits behind `cfg(unix)`. Imported
+    // unconditionally it is an unused import on the Windows target — which CI
+    // never builds, being Linux-only, so the warning was reachable solely by
+    // the cross-compile that produces the agent this crate exists to ship.
     #[cfg(unix)]
     {
-        let f = File::open(dir)?;
+        let f = std::fs::File::open(dir)?;
         f.sync_all()
     }
     #[cfg(not(unix))]

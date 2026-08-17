@@ -1,5 +1,5 @@
 <!-- file: changelog.d/20260816-trial-decodes-populate-decoders.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: bc57d73f-fa30-4536-bb8a-521980160fb8 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -53,3 +53,36 @@ because a soft fallback decodes every frame — on the CPU.
 
 A card that soft-falls-back is identical to a working one everywhere else in
 that output.
+
+### Fixed
+
+#### `journal.rs` no longer imports `File` on a target that cannot use it
+
+`std::fs::File` is named there exactly once, behind `cfg(unix)`. Imported
+unconditionally it was an unused import on the Windows target — which CI never
+builds, being Linux-only, so the warning was reachable only by the
+cross-compile that produces the agent this crate exists to ship.
+
+### Verified
+
+Both video paths were run end to end after the change, server on the Mac and
+`--transport stream`:
+
+| path | job | source → output | frames | encoder in the bitstream |
+|---|---|---|---|---|
+| GPU (`windows-rtx2070`) | `VideoGpu` | h264 `High` 20.2 Mbps → hevc `Main` 2.4 Mbps | 627 → 627 | `Lavc63.8.101 hevc_nvenc` |
+| CPU (Mac) | `VideoCpu` | av1 `Main` 1.2 Mbps → hevc `Main` 0.7 Mbps | 240 → 240 | `Lavc62.28.102 libx265` |
+
+Frame counts, not sizes: a decode that stops early still writes a smaller,
+structurally valid file, so size cannot distinguish success from truncation.
+
+The AV1 case is the one that discriminates. That agent reports av1 NVDEC as
+`VerifiedFail` (exit 69) and carries no `av1`/`Main` entry at all — only
+`av1`/*any profile*/8-bit/software. Matching is exact equality and fail-closed,
+so the job could dispatch only because the software requirement was emitted
+with an empty profile. With the profile populated it blocks, which is what the
+same job did before the change:
+
+    no enabled, commit-eligible agent satisfies AgentClass(Cpu)
+      + Encoder(Libx265) + Muxer(Matroska)
+      + Decoder(DecoderTriple { codec: "av1", profile: "Main", ... })
