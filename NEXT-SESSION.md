@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.13.0 -->
+<!-- version: 3.13.1 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-17 -->
 
@@ -217,6 +217,14 @@ or byte ranges.
    its build into an SEI and NVENC does not, so it corroborates the logs
    instead of restating them. Durations matched to the microsecond and the
    originals landed in trash.
+
+   **Every run above used a database created by the binary under test.** That
+   is the only configuration verified. A job created by an *earlier* binary
+   keeps whatever requirements it was created with and nothing refreshes them —
+   see the `REQ-REFRESH` trap at the end of this document. So start from a
+   fresh database when re-verifying, and treat any pre-2026-08-17 database as
+   holding jobs that block permanently on a `kind: Nvdec` requirement no
+   current code can emit. That block is the filed bug, not a new one.
 
    **Both artifacts were stale when I first ran this, and both lied
    convincingly.** The deployed `transcodarr-agent.exe` predated the
