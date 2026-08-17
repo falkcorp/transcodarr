@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.10.0 -->
+<!-- version: 3.11.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-16 -->
 
@@ -70,8 +70,31 @@ export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
 cargo build --release --target x86_64-pc-windows-gnu -p transcodarr-agent --bin transcodarr-agent
 ```
 
-ffmpeg on that box lives at `C:\Users\jdfal\bin\ffmpeg.exe` (note: `jdfal`, not
-`jdfalk`).
+### There are two ffmpeg builds on that node — pass the right one
+
+Note `jdfal`, not `jdfalk`, in both paths.
+
+| path | build | use it? |
+|---|---|---|
+| `C:\Users\jdfal\ffgpl\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe` | BtbN **GPL** `N-126175-g0056dd32fd-20260816`, has libx264/libx265 + nvenc | **yes — always** |
+| `C:\Users\jdfal\bin\ffmpeg.exe` | BtbN **LGPL**, `--disable-libx264 --disable-libx265` | no (kept only so nothing that referenced it breaks) |
+
+This matters more than it looks. Point `--ffmpeg` at the LGPL one and the agent
+can generate almost no trial samples, so nearly every decoder triple comes back
+`Untested`, so the node is offered no video work — and nothing in the output
+says why beyond a single `WARN`. The `survey` subcommand now prints the decoder
+table, so check it there first.
+
+```sh
+FF='C:\Users\jdfal\ffgpl\ffmpeg-master-latest-win64-gpl\bin'
+ssh windows-gpu "C:\\Users\\jdfal\\bin\\transcodarr-agent.exe survey \
+  --work-dir C:\\Users\\jdfal\\agentwork \
+  --ffmpeg $FF\\ffmpeg.exe --ffprobe $FF\\ffprobe.exe --transport stream"
+```
+
+An earlier handoff said "that box's ffmpeg has no libx264" as though it were a
+property of the machine. It was a property of the build that happened to be
+installed, and there are now two.
 
 ### Streaming groundwork + the spec (PR #80)
 
@@ -181,44 +204,53 @@ or byte ranges.
    Video with `hevc_nvenc` is what remains. Use an **8-bit H.264 source** and
    software decode; the Turing traps below are unchanged and untested by this.
 
-   ### What actually blocks video, measured 2026-08-16
+   ### What blocked video — resolved 2026-08-16
 
-   Not the transport, and **not primarily the Phase 5 code**. A `VideoGpu` job
-   requires `Decoder(h264/High/Eight, Nvdec)` at `VerifiedOk`; `survey.rs:103`
-   ships `decoders: Vec::new()` because trial decodes are Phase 5. Implementing
-   Phase 5 exactly as specified **would still leave that node unable to take
-   video work**, for a reason that is about the box, not the design:
+   Not the transport. A `VideoGpu` job requires a `Decoder(..., Nvdec)` triple
+   at `VerifiedOk`, and `survey.rs` shipped `decoders: Vec::new()`, so the
+   requirement could never be met by anyone. Both halves of the chosen
+   "install ffmpeg AND the fallback list" plan are now done, and the node
+   reports a full decoder table (`feat/trial-decodes`).
 
-   - The design already rules out embedded fixtures. `task-inventory.json`
-     S14-007 generates tiny lavfi clips "so probing needs no library media and
-     no LFS fixtures", choosing a **software** encoder per codec
-     (h264→libx264, hevc→libx265) and marking the triple `Untested` when that
-     encoder is absent. So the answer to "where does the sample come from" was
-     never fixtures — do not reintroduce them.
-   - That node's ffmpeg is a **BtbN LGPL build**: `--disable-libx264
-     --disable-libx265` (confirmed in `ffmpeg -version` configuration). So the
-     h264 and hevc samples cannot be generated, both triples go `Untested`, and
-     the requirement stays unmet.
-   - It *does* have `--enable-libopenh264` and `--enable-libkvazaar`. Measured
-     on the box: `libopenh264` emits **`profile=Constrained Baseline`**, so it
-     cannot honestly satisfy a `High` triple — recording one from a Baseline
-     sample would be the exact class of lie the trial exists to prevent.
-   - Measured on the box: **`h264_nvenc -profile:v high` produces a genuine
-     `profile=High`, `yuv420p` sample.** So a hardware-encoder fallback in the
-     sample generator does unblock `(h264, High, Eight)`.
-   - **The Hi10 trap cannot be reproduced on that box at all.** NVENC has no
-     H.264 High10 encode path and openh264 is 8-bit only, so
-     `(h264, High10, Ten)` — the silent-CPU-fallback case that motivated
-     `VerifiedSoftFallback` — stays `Untested` unless a GPL ffmpeg is
-     installed.
+   Measured verdicts on that card — worth keeping, because three of them
+   contradict what a simpler model would predict:
 
-   Three ways forward, and they differ in what gets built:
+   | triple | verdict |
+   |---|---|
+   | h264 `High` / `Main` / `Constrained Baseline`, 8-bit | hardware |
+   | h264 `High 4:2:2`, 8-bit | **silent CPU fallback** |
+   | h264 `High 10`, 10-bit | **silent CPU fallback** |
+   | hevc `Main`, 8-bit and `Main 10`, 10-bit | hardware |
+   | av1 `Main`, 8-bit | hard fail, exit 69 |
+   | vp9 `Profile 0`, mpeg2video `Main`, 8-bit | hardware |
 
-   | | what it costs | Hi10 trap testable |
-   |---|---|---|
-   | install a GPL ffmpeg build on the node | ops, remote-doable, side-by-side | **yes** |
-   | ordered encoder list w/ hardware fallback in the sample generator | code only, no box change | no |
-   | Phase 5 exactly as written | correct code, node still blocked | no |
+   - **10-bit HEVC works and 10-bit H.264 does not.** Any "this card can't do
+     10-bit" shorthand is wrong in both directions.
+   - **`High 4:2:2` fails at the same codec and depth as `High`, which works.**
+     This is why `profile` cannot be dropped from `DecoderTriple` even though
+     the Hi10 trap alone would seem to be a bit-depth story.
+   - **av1 exit 69 is now confirmed**, not remembered. It had been asserted in
+     module docs since Phase 1 against fixtures written from memory.
+
+   Three traps for whoever touches this next:
+
+   - **Profile strings are ffprobe's raw text and they contain spaces.**
+     `High 10`, `Main 10`, `Profile 0`, `Constrained Baseline`,
+     `High 4:2:2`. `docs/design/task-inventory.json` S14-005 says `High10`,
+     `Main10`, `Profile0` — those match nothing, and a triple that matches
+     nothing blocks the job at `capability` citing a hardware limit that does
+     not exist. Verified across two ffprobe builds and real library media.
+   - **The software path deliberately uses an empty profile.** See the comment
+     at `policy.rs:549`. Do not "fix" the asymmetry.
+   - **S14's file layout does not exist.** The spec's `capability/{matrix,
+     trial,fixtures,cache}.rs` assume a `ToolRunner` trait, `ProbeError` and an
+     async prober from S14-001..004 that were never built. The repo uses plain
+     `Command`, in `probe_samples.rs` and `probe_caps.rs`. Follow the repo.
+
+   Still deferred from S14: the on-disk capability cache (S14-009), so every
+   agent start re-runs the trials. That costs ~1s once the clips exist, since
+   `ensure` reuses them — measured 1.36s cold, 0.59s warm. Also deferred, per
+   plan: `ReprobeCapabilities`, `fingerprint_watch`, `ArcSwap` swapping.
 
    **Two bugs stood between the merged code and a working node, and neither was
    in the transport.** Both are the same shape: a thing that looked configured
@@ -253,7 +285,8 @@ or byte ranges.
    ssh windows-gpu 'set "RUST_LOG=info" && C:\Users\jdfalk\transcodarr-agent.exe connect ^
      --server http://172.16.3.222:7420 --id win-rtx2070 ^
      --work-dir C:\Users\jdfalk\tc-work --transport stream ^
-     --ffmpeg C:\Users\jdfal\bin\ffmpeg.exe --ffprobe C:\Users\jdfal\bin\ffprobe.exe'
+     --ffmpeg C:\Users\jdfal\ffgpl\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe ^
+     --ffprobe C:\Users\jdfal\ffgpl\ffmpeg-master-latest-win64-gpl\bin\ffprobe.exe'
    ```
 
    System `sqlite3` on the Mac is too old for this schema's `STRICT` tables
@@ -344,7 +377,8 @@ fleet to contend for the destination — but it is real.
   NVENC encode. Gate hardware decode per codec, never globally.
 - **Probe by trial, never by asking ffmpeg what it lists.** Confirmed again
   today: that ffmpeg lists `av1_nvenc` and the hardware cannot do it.
-- That ffmpeg build has **no libx264** — no software video fallback on the box.
+- The **LGPL** build at `C:\Users\jdfal\bin` has no libx264. The GPL build
+  now installed at `C:\Users\jdfal\ffgpl\...` does. Pass the GPL one.
 - ICMP is filtered on `windows-rtx2070`. `ping` failing proves nothing; test port 22.
 - **The agent must `stamp()` its transfer requests.** Every RPC other than
   `Connect` has to assert its own identity; the stamp that authenticated the
