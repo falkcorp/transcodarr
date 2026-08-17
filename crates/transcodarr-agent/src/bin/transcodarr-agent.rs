@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/bin/transcodarr-agent.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: b5c59c65-0497-44f1-8c9d-b9dec72e1d96
 // last-edited: 2026-08-16
 //! The agent, on its own, with no database in it.
@@ -169,6 +169,41 @@ fn survey_only(args: &SurveyArgs) -> Result<()> {
         "transport         {}",
         if streaming { "stream" } else { "mount" }
     );
+
+    // The decode verdicts are the expensive half of the survey and the half an
+    // operator most needs to see: a card that soft-falls-back looks identical
+    // to a working one everywhere else in this output.
+    if capability.decoders.is_empty() {
+        println!("\ndecoders          none trialled -- this agent will be offered no video work");
+    } else {
+        println!("\ndecoders");
+        for d in &capability.decoders {
+            let t = d.triple.as_ref();
+            let (codec, profile, depth) = t.map_or(("?", "", 0), |t| {
+                (t.codec.as_str(), t.profile.as_str(), t.bit_depth)
+            });
+            let kind = t.map_or("?", |t| match t.kind() {
+                transcodarr_agent::pb::DecoderKind::DkNvdec => "nvdec",
+                transcodarr_agent::pb::DecoderKind::DkSoftware => "software",
+                other => other.as_str_name(),
+            });
+            let verdict = match d.status() {
+                transcodarr_agent::pb::DecoderStatus::DsVerifiedOk => "ok",
+                transcodarr_agent::pb::DecoderStatus::DsVerifiedSoftFallback => "SOFT FALLBACK",
+                transcodarr_agent::pb::DecoderStatus::DsVerifiedFail => "FAIL",
+                _ => "untested",
+            };
+            let named = if profile.is_empty() {
+                "any profile"
+            } else {
+                profile
+            };
+            println!(
+                "  {codec:<11} {named:<22} {depth:>2}-bit {kind:<9} {verdict:<14} {}",
+                d.evidence
+            );
+        }
+    }
 
     if capability.mounts.is_empty() {
         println!("\nmounts            none");

@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/survey.rs
-// version: 1.3.0
+// version: 1.4.0
 // guid: 3d92b0a7-5c14-4b86-9e02-7fa3b1d6485c
 // last-edited: 2026-08-16
 //! What this machine can actually do, as a capability document.
@@ -33,13 +33,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use transcodarr_core::capability::{
-    AgentClass, Capability, ContainerId, Mount, Platform, TransportMode,
+    AgentClass, Capability, ContainerId, DecoderKind, DecoderStatus, Mount, Platform, TransportMode,
 };
 use transcodarr_core::plan::EncoderId;
 use transcodarr_proto::pb;
 
 use crate::AgentError;
 use crate::preflight;
+use crate::{probe_caps, probe_samples};
 
 /// Every encoder this build knows how to ask for.
 const KNOWN_ENCODERS: [EncoderId; 6] = [
@@ -86,7 +87,9 @@ pub struct SurveyConfig {
 /// probe per mount — and that is the right trade. Every one of those probes
 /// replaces an assumption that would otherwise be discovered as a failed job.
 pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
-    let encoders = available_encoders(&config.ffmpeg);
+    let encoder_listing =
+        tool_output(&config.ffmpeg, &["-hide_banner", "-encoders"]).unwrap_or_default();
+    let encoders = available_encoders(&encoder_listing);
     let muxers = available_muxers(&config.ffmpeg);
 
     let document = Capability {
@@ -96,11 +99,7 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
         classes: classes_for(&encoders),
         encoders: encoders.clone(),
         muxers,
-        // Trial decodes are Phase 5. An empty list means every hardware-decode
-        // requirement goes unmet, which is the safe direction: `DS_UNTESTED`
-        // must never satisfy one, because the Turing Hi10 failure exits zero
-        // having silently decoded on the CPU.
-        decoders: Vec::new(),
+        decoders: trial_decoders(config, &encoder_listing),
         effective_cores: effective_cores(),
         mounts: config
             .mounts
@@ -146,6 +145,25 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
 /// Audio-only work needs no video encoder at all — it is `-c:v copy` — so an
 /// agent always offers it. The others are offered only if the encoder they
 /// require is actually present.
+///
+/// ## Why `gpu` is not also gated on a verified hardware *decoder*
+///
+/// The design sketch says it should be: "a SoftFallback-only GPU is NOT a
+/// gpu-class agent." It is left coarse on purpose, because the gate would be
+/// redundant and would additionally deny work this node can do.
+///
+/// `AgentClass::Gpu` and `Requirement::Decoder { kind: Nvdec, .. }` are emitted
+/// from the *same* branch of the policy engine — a job that asks for the class
+/// always also names the exact triple it needs, and that triple is matched
+/// against the trial verdicts. The precise gate already exists one level down,
+/// per file. A class-level gate on top of it adds nothing except a way to
+/// refuse a card that decodes on the CPU and encodes on NVENC, which is a
+/// perfectly good arrangement and measurably faster than a CPU node.
+///
+/// Verified on `windows-rtx2070` on 2026-08-16: seven hardware triples come
+/// back `VerifiedOk` there, so tightening this would not have changed that
+/// node's classes either way. The reason to leave it is the redundancy, not the
+/// measurement.
 fn classes_for(encoders: &[EncoderId]) -> Vec<AgentClass> {
     let mut classes = vec![AgentClass::Audio];
     if encoders.contains(&EncoderId::Libx265) || encoders.contains(&EncoderId::Libx264) {
@@ -158,13 +176,67 @@ fn classes_for(encoders: &[EncoderId]) -> Vec<AgentClass> {
 }
 
 /// Encoders this ffmpeg actually has.
-fn available_encoders(ffmpeg: &str) -> Vec<EncoderId> {
-    let listing = tool_output(ffmpeg, &["-hide_banner", "-encoders"]).unwrap_or_default();
+fn available_encoders(listing: &str) -> Vec<EncoderId> {
     KNOWN_ENCODERS
         .iter()
         .copied()
-        .filter(|e| lists_name(&listing, e.as_ffmpeg()))
+        .filter(|e| lists_name(listing, e.as_ffmpeg()))
         .collect()
+}
+
+/// How long one trial decode may take before it counts as a failure.
+///
+/// Ten frames of 320x240 is milliseconds of work; anything approaching this is
+/// a driver or hardware initialisation that is not going to finish. Generous
+/// enough that a loaded machine is not misjudged, short enough that a whole
+/// probe cannot stall registration for long.
+const TRIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What this machine's decoders do, established by decoding something.
+///
+/// This is the expensive part of the survey and the reason the survey is worth
+/// running at all. `ffmpeg -decoders` lists what the build was compiled with;
+/// only a trial decode distinguishes that from what the silicon will do, and on
+/// the measured Turing card the two disagree for AV1, 10-bit H.264, and 4:2:2
+/// and 4:4:4 H.264 — the last three silently, exiting zero.
+///
+/// Every failure here is soft. A machine with no ffmpeg, no writable sample
+/// directory or no usable encoder returns an empty list and registers with no
+/// decode capability, which blocks video work rather than misrouting it.
+fn trial_decoders(
+    config: &SurveyConfig,
+    encoder_listing: &str,
+) -> Vec<transcodarr_core::capability::DecoderCapability> {
+    // A directory of our own under the work area. The operator has already said
+    // the agent may write there, and keeping the clips out of the root leaves
+    // them clearly distinguishable from the job staging that shares it.
+    let dir = Path::new(&config.work_dir).join("capability-samples");
+    let samples = probe_samples::ensure(&config.ffmpeg, &config.ffprobe, &dir, encoder_listing);
+    if samples.is_empty() {
+        tracing::warn!(
+            dir = %dir.display(),
+            "no trial sample could be generated; this agent will not be offered video work"
+        );
+        return Vec::new();
+    }
+
+    let hwaccels = tool_output(&config.ffmpeg, &["-hide_banner", "-hwaccels"]).unwrap_or_default();
+    let mut triples = probe_samples::software_triples(&samples);
+    triples.extend(probe_samples::nvdec_triples(&samples, &hwaccels));
+
+    let decoders = probe_caps::run_all(&config.ffmpeg, &triples, TRIAL_TIMEOUT);
+    tracing::info!(
+        samples = samples.len(),
+        trials = decoders.len(),
+        hardware_ok = decoders
+            .iter()
+            .filter(
+                |d| d.triple.kind != DecoderKind::Software && d.status == DecoderStatus::VerifiedOk
+            )
+            .count(),
+        "trial decodes complete"
+    );
+    decoders
 }
 
 /// Muxers this ffmpeg actually has.
@@ -185,7 +257,7 @@ fn available_muxers(ffmpeg: &str) -> Vec<ContainerId> {
 /// Matched as a whole word in the name column. A substring test would find
 /// `aac` inside `aac_at` and `libfdk_aac`, and report an encoder this build
 /// cannot actually invoke by that name.
-fn lists_name(listing: &str, name: &str) -> bool {
+pub(crate) fn lists_name(listing: &str, name: &str) -> bool {
     listing.lines().any(|line| {
         // ffmpeg prints " V..... libx265   libx265 H.265 ..." — flags, then the
         // name, then the description.

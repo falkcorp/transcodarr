@@ -1,5 +1,5 @@
 // file: crates/transcodarr-core/src/policy.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: 2d8f47a1-0c96-4b53-89e7-f14b6a03d752
 // last-edited: 2026-08-16
 //! The rules engine, and `Default Space Saver`.
@@ -550,10 +550,28 @@ pub fn next_job(d: &Decision, facts: &FileFacts, t: &SizeThresholds) -> Option<J
             // the decode path explicitly is what keeps AV1 and Hi10 off the
             // Turing card: the requirement fails to match rather than the job
             // failing at runtime with a truncated output.
+            //
+            // The profile is asked for on the hardware path only, and this
+            // asymmetry is measured rather than tidy. On Turing NVDEC, at a
+            // fixed codec and bit depth, `Constrained Baseline`, `Main` and
+            // `High` H.264 all decode in hardware while `High 4:2:2` and
+            // `High 4:4:4 Predictive` silently fall back to the CPU — so the
+            // profile carries a verdict that codec and depth do not, and
+            // dropping it would advertise a decoder this card does not have.
+            // Software decode has no such distinction: ffmpeg either has the
+            // decoder compiled in or it does not, which is what `-decoders`
+            // already answered. Keying the software triple on the profile too
+            // would mean every profile nobody thought to trial — `Main` is the
+            // common one, and it is not in any candidate list — went `Untested`
+            // and blocked the *CPU* path as well, for no safety in return.
             if let Some(codec) = &facts.video_codec {
                 reqs.push(Requirement::Decoder(DecoderTriple {
                     codec: codec.clone(),
-                    profile: facts.video_profile.clone().unwrap_or_default(),
+                    profile: if gpu {
+                        facts.video_profile.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    },
                     bit_depth: plan.source_depth,
                     kind: if gpu {
                         DecoderKind::Nvdec

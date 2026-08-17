@@ -17,6 +17,7 @@ pub mod identity;
 pub mod journal;
 pub mod preflight;
 pub mod probe_caps;
+pub mod probe_samples;
 pub mod run;
 pub mod survey;
 pub mod workarea;
