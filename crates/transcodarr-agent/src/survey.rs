@@ -1,5 +1,5 @@
 // file: crates/transcodarr-agent/src/survey.rs
-// version: 1.4.0
+// version: 1.5.0
 // guid: 3d92b0a7-5c14-4b86-9e02-7fa3b1d6485c
 // last-edited: 2026-08-16
 //! What this machine can actually do, as a capability document.
@@ -149,21 +149,26 @@ pub fn survey(config: &SurveyConfig) -> Result<pb::Capability, AgentError> {
 /// ## Why `gpu` is not also gated on a verified hardware *decoder*
 ///
 /// The design sketch says it should be: "a SoftFallback-only GPU is NOT a
-/// gpu-class agent." It is left coarse on purpose, because the gate would be
-/// redundant and would additionally deny work this node can do.
+/// gpu-class agent." It is left coarse on purpose, and the reason is now
+/// simpler than it used to be: **a GPU job does not decode in hardware.**
 ///
-/// `AgentClass::Gpu` and `Requirement::Decoder { kind: Nvdec, .. }` are emitted
-/// from the *same* branch of the policy engine — a job that asks for the class
-/// always also names the exact triple it needs, and that triple is matched
-/// against the trial verdicts. The precise gate already exists one level down,
-/// per file. A class-level gate on top of it adds nothing except a way to
-/// refuse a card that decodes on the CPU and encodes on NVENC, which is a
-/// perfectly good arrangement and measurably faster than a CPU node.
+/// `plan::build_ffmpeg_argv_raw` cannot emit `-hwaccel` — that is an input
+/// option and the builder puts nothing before `-i` — so every `VideoGpu` job
+/// software-decodes and NVENC-encodes, and `policy.rs` asks for exactly that.
+/// Nothing about a job's decode depends on what NVDEC can do, so a class gate
+/// on the decode verdicts would only refuse a card that decodes on the CPU and
+/// encodes on NVENC. That is the arrangement every GPU job uses, and it is
+/// measurably faster than a CPU node.
 ///
-/// Verified on `windows-rtx2070` on 2026-08-16: seven hardware triples come
-/// back `VerifiedOk` there, so tightening this would not have changed that
-/// node's classes either way. The reason to leave it is the redundancy, not the
-/// measurement.
+/// This function's shape is therefore unchanged, but its justification is not.
+/// It previously read that the gate was *redundant*, because a job asking for
+/// `AgentClass::Gpu` also named the `Nvdec` triple it needed and that triple
+/// was matched per file. That pairing no longer exists. The gate is not
+/// redundant now — it is simply about the wrong thing.
+///
+/// The verdicts are still measured and still printed by `survey`, because they
+/// become load-bearing the moment the plan builder can request a hardware
+/// decode. See `todo.d` `GPU-NVDEC`.
 fn classes_for(encoders: &[EncoderId]) -> Vec<AgentClass> {
     let mut classes = vec![AgentClass::Audio];
     if encoders.contains(&EncoderId::Libx265) || encoders.contains(&EncoderId::Libx264) {
