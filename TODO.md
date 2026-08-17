@@ -1,5 +1,5 @@
 <!-- file: TODO.md -->
-<!-- version: 0.6.3 -->
+<!-- version: 0.6.4 -->
 <!-- guid: 12345678-90ab-cdef-1234-567890abcdef -->
 
 # TODO
@@ -12,6 +12,91 @@ file in `todo.d/` rather than editing this section by hand — see
 into one of the curated sections below, is a normal direct edit.
 
 <!-- todo-insert-here -->
+
+- [ ] **GPU-NVDEC** Teach the plan builder to request a hardware decode, so the
+      NVDEC verdicts the agent already measures become load-bearing.
+      `build_ffmpeg_argv_raw` (`plan.rs:302`) emits `-i <input>` immediately
+      before `-c:v` and appends its `extra` arguments *after* the codec flags.
+      `-hwaccel` is an input option and must precede `-i`, so the builder
+      cannot express one at all — every `VideoGpu` job software-decodes and
+      NVENC-encodes.
+
+      The over-constraint this caused is already fixed: the decode requirement
+      now says `Software` with an empty profile, matching the work performed,
+      which unblocked `h264 High 4:2:2`, `h264 High 10` and `av1 Main` on the
+      Turing node. What remains is the *other* half — making the pipeline live
+      up to the original intent at `policy.rs`, that "a hardware encoder
+      implies nothing about the decoder, which is the gap Hi10 falls through."
+
+      Needs, in order:
+
+      1. An input-options slot in the argv builder, before `-i`. Everything
+         today goes after it, so this is a structural change to the builder
+         rather than another `extra`.
+      2. `-hwaccel cuda -hwaccel_output_format cuda` on GPU plans, gated on the
+         agent's trial verdict for that exact triple rather than on the class —
+         `VerifiedSoftFallback` must *not* take the hardware path, because it
+         silently decodes on the CPU while looking like a success.
+      3. pix_fmt rework. Frames then stay in device memory and `p010le` is a
+         system-memory format, so the current `pix_fmt_for` mapping
+         (`policy.rs:276`) does not apply unchanged; a `format=cuda` filter or
+         an explicit `hwdownload` is needed depending on the filter chain.
+      4. Restore a decode requirement that names `Nvdec` and the real profile
+         for plans that take the hardware path — the shape reverted here, but
+         emitted only when the plan actually asks for `-hwaccel`.
+
+      Worth doing for throughput, not correctness: software decode of 1080p
+      h264 feeding NVENC already ran at 248 fps on that card, so this is not
+      urgent.
+
+- [ ] **REQ-REFRESH** A job's requirements are written once at creation and no
+      command can refresh them, so a policy *code* change that alters emitted
+      requirements never reaches jobs that already exist.
+
+      Measured on a database created by the pre-change binary: a `VideoGpu` job
+      blocked at `capability` on `Decoder(DecoderTriple { codec: "h264",
+      profile: "High 10", bit_depth: Ten, kind: Nvdec })` still reads exactly
+      that after `admin evaluate` against a binary that no longer emits
+      `Nvdec` at all — `evaluated 0, 0 jobs created`.
+
+      Two independent barriers, either of which alone is enough:
+
+      1. `rules_version` (`policy.rs:327`) is `blake3(serde_json(policy))` — a
+         hash of the policy *config*. A code change that alters requirement
+         generation leaves it byte-identical, so `needs_eval` never returns the
+         file and the evaluator loop exits having looked at nothing.
+      2. `evaluate_one` (`evaluator.rs:155`) returns `already_busy` as soon as
+         an open job exists for the file, which is *before* `next_job`
+         recomputes the spec. So even forcing the file back into the working
+         set would not rewrite `requirements_json`.
+
+      There is no recourse: `admin` has no cancel, reset or requeue command
+      (`diagnose`, `add-library`, `libraries`, `scan`, `evaluate`, `explain`,
+      `run`, `summary`), so an operator's only option is editing SQLite by
+      hand. The job blocks forever and `explain` names a requirement no
+      currently-installed code can ever emit, which reads as a capability gap
+      rather than a stale row.
+
+      Needs, roughly in order:
+
+      1. Decide the refresh rule. Requirements on a `Pending` job are pure
+         derived data and safe to rewrite; a `Dispatched`/`Running` job has an
+         agent holding a lease against the old set and must not be touched
+         mid-flight. Refresh `Pending` only, leave the rest to finish or fail.
+      2. Rewrite `requirements_json` *and* `requirements_bucket_key` together —
+         dispatch matches on the bucket key, so refreshing one without the
+         other is worse than refreshing neither.
+      3. A way to force the file back into the working set, since barrier 1
+         means the policy hash will not do it. Either an `admin evaluate
+         --all` that ignores the recorded `rules_version`, or fold a build
+         identifier into `RulesVersion` so a code change invalidates decisions
+         the way a config change already does. The second is more honest about
+         what the version means but re-evaluates every file on every upgrade.
+      4. An `admin jobs cancel <id>` regardless, as the escape hatch for every
+         other way a job can become permanently unsatisfiable.
+
+      Found while shipping the `Software` decode requirement: that change is
+      correct for jobs created after it, and invisible to jobs created before.
 
 - [ ] **TODO-TRANSPORT-2** Specify and build the second transport mode — gRPC
       byte streaming — which the design intended and the architecture document
