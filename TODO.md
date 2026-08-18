@@ -1,5 +1,5 @@
 <!-- file: TODO.md -->
-<!-- version: 0.6.4 -->
+<!-- version: 0.6.5 -->
 <!-- guid: 12345678-90ab-cdef-1234-567890abcdef -->
 
 # TODO
@@ -92,8 +92,11 @@ into one of the curated sections below, is a normal direct edit.
          identifier into `RulesVersion` so a code change invalidates decisions
          the way a config change already does. The second is more honest about
          what the version means but re-evaluates every file on every upgrade.
-      4. An `admin jobs cancel <id>` regardless, as the escape hatch for every
-         other way a job can become permanently unsatisfiable.
+      4. ~~An `admin jobs cancel <id>` regardless, as the escape hatch for
+         every other way a job can become permanently unsatisfiable.~~
+         **Done 2026-08-18.** `--force` covers a job an agent holds;
+         `Committing` is refused regardless. Items 1–3 are still open, so a
+         stale job must still be cancelled by hand rather than refreshed.
 
       Found while shipping the `Software` decode requirement: that change is
       correct for jobs created after it, and invisible to jobs created before.
