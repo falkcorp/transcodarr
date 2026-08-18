@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.14.1 -->
+<!-- version: 3.15.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-18 -->
 
@@ -466,6 +466,19 @@ passes over it. Lower stakes — it is the single-machine path, and there is no
 fleet to contend for the destination — but it is real.
 
 ## Traps still standing
+
+- **CI can report green having compiled nothing.** `ci.yml` gates `test-rust`
+  on `detect-changes` (`rustfiles` or `workflowfiles`), and sets
+  `concurrency.cancel-in-progress: true` keyed on the ref. Push Rust, then push
+  a docs commit a minute later, and the first run is *cancelled* while every
+  later run *skips* `Test Rust` for having touched no `.rs` file. Neither shows
+  as a failure -- the summary is green and the job says `skipped`, which reads
+  as "not needed" rather than "never ran". This is how `admin jobs cancel`
+  merged with its suite never having run on a runner; the fix was to rerun the
+  cancelled job by id (`gh run rerun <run> --job <job>`), pinned to the feature
+  commit -- run `32124135022`, job `95670892050`, which then passed all nine
+  steps (fmt, clippy, build, test, release) on `623419d`. **Check `Test Rust`
+  actually ran, not just that CI was green.**
 
 - Turing NVDEC cannot decode AV1 (exit 69, ~1 KB truncated) or 10-bit H.264
   (silent software fallback). Use an **8-bit H.264 source**, software decode,
