@@ -1,5 +1,5 @@
 <!-- file: changelog.d/20260818-admin-jobs-cancel.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.0.1 -->
 <!-- guid: 3d7c4e91-58ab-4f26-9c03-e1b58a2d7f40 -->
 <!-- last-edited: 2026-08-18 -->
 
@@ -7,7 +7,7 @@
 
 #### `admin jobs cancel` — an operator can end a job that can never finish
 
-```
+```text
 transcodarr admin jobs cancel <id> [--reason <text>] [--force]
 ```
 

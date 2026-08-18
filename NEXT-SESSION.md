@@ -1,5 +1,5 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.14.0 -->
+<!-- version: 3.14.1 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
 <!-- last-edited: 2026-08-18 -->
 
@@ -15,7 +15,7 @@ still needs hands on the box.
 
 ## Done 2026-08-18: `admin jobs cancel` (PR #91, `623419d`)
 
-```
+```text
 transcodarr admin jobs cancel <id> [--reason <text>] [--force]
 ```
 
