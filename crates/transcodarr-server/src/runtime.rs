@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/runtime.rs
-// version: 1.0.0
+// version: 1.1.0
 // guid: b5c1e08d-7f34-42a6-9013-8ae62d5f71bc
-// last-edited: 2026-08-03
+// last-edited: 2026-08-18
 //! Opening the store, and the operator-facing surface over it.
 //!
 //! This module exists to settle a layering question the store's own
@@ -17,7 +17,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use transcodarr_store::repo::{LibraryRecord, LibraryRepo};
+use transcodarr_core::job::JobState;
+use transcodarr_store::repo::{JobRepo, LibraryRecord, LibraryRepo};
 use transcodarr_store::{Db, ReadPool, WriteLane, Writer};
 
 use crate::ServerError;
@@ -132,12 +133,282 @@ impl Runtime {
         )?;
         Ok(ack.rows)
     }
+
+    /// Cancel a job, at an operator's request.
+    ///
+    /// This is the escape hatch for a job that has become permanently
+    /// unsatisfiable — most often one whose stored requirements no longer
+    /// match anything the current code can emit, which nothing else can clear.
+    ///
+    /// ## Three things this deliberately does not do
+    ///
+    /// Each looks like it needs handling here and is already covered. Adding
+    /// any of them would be a no-op that reads as though it were load-bearing.
+    ///
+    /// - **Release the capacity slot.** The ledger is rebuilt from the
+    ///   database on every tick (`Orchestrator::tick` -> `rebuild_capacity`),
+    ///   and `CapacityLedger::rebuild` skips any state where
+    ///   `!occupies_slot`. A cancelled job stops holding its slot on the next
+    ///   pass. Releasing it from here would in any case touch this process's
+    ///   ledger, not the running server's.
+    /// - **Resolve the commit intent.** `sweep_stranded_intents` resolves
+    ///   live intents whose job is terminal and not `NeedsOperator`. A
+    ///   cancelled job is exactly that, so the row is closed for us.
+    /// - **Tell the agent.** `on_heartbeat` revokes any running job whose
+    ///   state is not in `HELD_STATES`, and the agent sweeps its work area on
+    ///   every exit path. So `force` needs no new protocol message — though
+    ///   note the agent checks the revoke only after its encode finishes, so a
+    ///   forced cancel stops the *install*, not the ffmpeg process.
+    ///
+    /// ## Why `Committing` is refused even under `force`
+    ///
+    /// It is the window between the commit ritual's two renames, which is the
+    /// ambiguity `NeedsOperator` exists to record. Cancelling there races a
+    /// rename on real files, and sweeping the intent afterwards would free a
+    /// destination whose on-disk state nobody has determined — the next job
+    /// for that file would install over it.
+    ///
+    /// Returns the state the job was cancelled from.
+    pub fn cancel_job(
+        &self,
+        job_id: &str,
+        reason: Option<&str>,
+        force: bool,
+    ) -> Result<JobState, ServerError> {
+        let from = JobRepo::new(self.pool.clone()).get(job_id)?.state;
+
+        let refuse = |hint: &str| {
+            Err(ServerError::CancelRefused {
+                job_id: job_id.to_string(),
+                state: from.as_str().to_string(),
+                hint: hint.to_string(),
+            })
+        };
+
+        if from.is_terminal() {
+            return refuse(
+                "it has already finished; terminal rows are immutable, and a retry \
+                 inserts a new job rather than reanimating this one",
+            );
+        }
+        if from == JobState::Committing {
+            return refuse(
+                "the commit ritual is mid-rename -- wait for it to land, or for it \
+                 to resolve as NeedsOperator if the outcome is ambiguous",
+            );
+        }
+        if from.holds_capacity() && !force {
+            return refuse("an agent is holding it; pass --force to cancel anyway");
+        }
+
+        self.writer.submit_blocking(
+            WriteLane::Normal,
+            JobRepo::transition_op(
+                job_id.to_string(),
+                from,
+                JobState::Cancelled,
+                // The code is what a machine reads back out of `terminal_reason`;
+                // the operator's note is the detail on the event. Passing `None`
+                // for the code would leave a terminal row with no recorded why.
+                Some("operator_cancelled".to_string()),
+                reason.map(str::to_string),
+            ),
+        )?;
+        Ok(from)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use transcodarr_core::facts::SizeBucket;
+    use transcodarr_core::job::JobClass;
+    use transcodarr_store::repo::{FileUpsert, NewJob};
+
+    /// A runtime with one library, one file and one job, left in `state`.
+    ///
+    /// The job is walked into `state` through `transition_op` rather than
+    /// inserted there, so the fixture cannot assert a state the state machine
+    /// would refuse. A harness that writes the row directly would happily set
+    /// up a job in a shape production can never produce.
+    fn with_job(state: JobState) -> (TempDir, Runtime, JobRepo) {
+        let d = TempDir::new().unwrap();
+        let rt = Runtime::open_unchecked(&d.path().join("t.db")).unwrap();
+        rt.add_library("tv", "Television", "/mnt/tv", "/w", "/t", 300)
+            .unwrap();
+
+        let path = "/mnt/tv/show.mkv";
+        let file_id = rt
+            .writer
+            .submit_blocking(
+                WriteLane::Normal,
+                transcodarr_store::repo::FileRepo::upsert_op(FileUpsert {
+                    library_id: "tv".into(),
+                    canonical_path: path.into(),
+                    path_hash: transcodarr_core::stable_hash(path.as_bytes()),
+                    size_bytes: 1_000_000_000,
+                    mtime_unix: 1000,
+                    mtime_ns: 0,
+                    inode: Some(1),
+                    dev: Some(1),
+                    nlink: 1,
+                    scan_generation: 1,
+                }),
+            )
+            .unwrap()
+            .last_id
+            .expect("the file insert returns its row id");
+
+        rt.writer
+            .submit_blocking(
+                WriteLane::Normal,
+                JobRepo::create_op(NewJob {
+                    id: "j1".into(),
+                    file_id,
+                    library_id: "tv".into(),
+                    class: JobClass::VideoGpu,
+                    size_bucket: SizeBucket::Large,
+                    requirements_json: "[]".into(),
+                    requirements_bucket_key: "k".into(),
+                    expected_content_sig: "sig".into(),
+                    rules_version: "v".into(),
+                    priority: 0,
+                    parent_job_id: None,
+                }),
+            )
+            .unwrap();
+
+        // Walk the legal path to whichever state the test wants.
+        let route: &[JobState] = match state {
+            JobState::Pending => &[],
+            JobState::Blocked => &[JobState::Blocked],
+            JobState::Eligible => &[JobState::Eligible],
+            JobState::Retrying => &[
+                JobState::Eligible,
+                JobState::Assigned,
+                JobState::Running,
+                JobState::Retrying,
+            ],
+            JobState::Assigned => &[JobState::Eligible, JobState::Assigned],
+            JobState::Running => &[JobState::Eligible, JobState::Assigned, JobState::Running],
+            JobState::Verifying => &[
+                JobState::Eligible,
+                JobState::Assigned,
+                JobState::Running,
+                JobState::Verifying,
+            ],
+            JobState::Committing => &[
+                JobState::Eligible,
+                JobState::Assigned,
+                JobState::Running,
+                JobState::Verifying,
+                JobState::Committing,
+            ],
+            JobState::Succeeded => &[
+                JobState::Eligible,
+                JobState::Assigned,
+                JobState::Running,
+                JobState::Verifying,
+                JobState::Committing,
+                JobState::Succeeded,
+            ],
+            other => panic!("no route to {other:?}"),
+        };
+        let mut from = JobState::Pending;
+        for to in route {
+            rt.writer
+                .submit_blocking(
+                    WriteLane::Normal,
+                    JobRepo::transition_op("j1".into(), from, *to, None, None),
+                )
+                .unwrap();
+            from = *to;
+        }
+
+        let jobs = JobRepo::new(rt.pool.clone());
+        assert_eq!(jobs.get("j1").unwrap().state, state, "fixture setup");
+        (d, rt, jobs)
+    }
+
+    #[test]
+    fn a_queued_job_is_cancelled_and_records_both_the_code_and_the_operators_note() {
+        for state in [
+            JobState::Pending,
+            JobState::Blocked,
+            JobState::Eligible,
+            JobState::Retrying,
+        ] {
+            let (_d, rt, jobs) = with_job(state);
+            let from = rt
+                .cancel_job("j1", Some("source is a duplicate"), false)
+                .unwrap();
+            assert_eq!(from, state);
+
+            let job = jobs.get("j1").unwrap();
+            assert_eq!(job.state, JobState::Cancelled, "from {state:?}");
+            // The code is what a machine reads back; without it the row is a
+            // terminal job with no recorded why.
+            assert_eq!(job.terminal_reason.as_deref(), Some("operator_cancelled"));
+
+            let last = jobs.events("j1").unwrap().pop().unwrap();
+            assert_eq!(last.to_state, JobState::Cancelled);
+            assert_eq!(last.detail.as_deref(), Some("source is a duplicate"));
+        }
+    }
+
+    /// Terminal rows are immutable; a retry inserts a new job with
+    /// `parent_job_id` rather than reanimating this one.
+    #[test]
+    fn a_finished_job_cannot_be_cancelled() {
+        let (_d, rt, jobs) = with_job(JobState::Succeeded);
+        let e = rt.cancel_job("j1", None, true).unwrap_err();
+        assert!(matches!(e, ServerError::CancelRefused { .. }), "{e:?}");
+        assert_eq!(jobs.get("j1").unwrap().state, JobState::Succeeded);
+    }
+
+    /// Deleting the `force` guard must fail this test.
+    #[test]
+    fn a_job_an_agent_is_holding_is_refused_without_force() {
+        for state in [JobState::Assigned, JobState::Running, JobState::Verifying] {
+            let (_d, rt, jobs) = with_job(state);
+            let e = rt.cancel_job("j1", None, false).unwrap_err();
+            assert!(
+                matches!(e, ServerError::CancelRefused { .. }),
+                "{state:?}: {e:?}"
+            );
+            assert_eq!(jobs.get("j1").unwrap().state, state);
+        }
+    }
+
+    #[test]
+    fn force_cancels_a_job_an_agent_is_holding() {
+        for state in [JobState::Assigned, JobState::Running, JobState::Verifying] {
+            let (_d, rt, jobs) = with_job(state);
+            assert_eq!(rt.cancel_job("j1", None, true).unwrap(), state);
+            assert_eq!(jobs.get("j1").unwrap().state, JobState::Cancelled);
+        }
+    }
+
+    /// Deleting the `Committing` carve-out must fail this test.
+    ///
+    /// That state is the window between the commit ritual's two renames, which
+    /// is exactly the ambiguity `NeedsOperator` exists to record. Cancelling
+    /// there races a rename on real files and frees a destination whose
+    /// on-disk state nobody has determined.
+    #[test]
+    fn a_committing_job_is_refused_even_under_force() {
+        let (_d, rt, jobs) = with_job(JobState::Committing);
+        let e = rt.cancel_job("j1", None, true).unwrap_err();
+        assert!(matches!(e, ServerError::CancelRefused { .. }), "{e:?}");
+        assert_eq!(jobs.get("j1").unwrap().state, JobState::Committing);
+    }
+
+    #[test]
+    fn an_unknown_job_is_an_error_rather_than_a_silent_success() {
+        let (_d, rt, _jobs) = with_job(JobState::Pending);
+        assert!(rt.cancel_job("nope", None, true).is_err());
+    }
 
     #[test]
     fn a_library_can_be_registered_and_listed_without_touching_the_store_directly() {

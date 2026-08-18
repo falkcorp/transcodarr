@@ -1,7 +1,7 @@
 // file: crates/transcodarr-cli/src/admin.rs
-// version: 1.1.0
+// version: 1.2.0
 // guid: 5b8e1a37-c204-4d69-9f52-a03e7b64c81d
-// last-edited: 2026-08-03
+// last-edited: 2026-08-18
 //! The `admin` subcommand: operator diagnostics.
 
 use std::path::PathBuf;
@@ -149,6 +149,43 @@ pub enum AdminCommand {
         #[arg(long)]
         library: Option<String>,
     },
+
+    /// Operate on individual jobs.
+    Jobs {
+        /// What to do.
+        #[command(subcommand)]
+        cmd: JobsCommand,
+    },
+}
+
+/// The `admin jobs` group.
+///
+/// A group rather than a flat `admin cancel` so that `jobs list` and
+/// `jobs show` can be added later without renaming this one. A job id is
+/// already discoverable: `admin explain <path>` prints it.
+#[derive(Subcommand, Debug)]
+pub enum JobsCommand {
+    /// Cancel a job.
+    ///
+    /// The escape hatch for a job that can never be satisfied — most often one
+    /// whose stored requirements no longer match anything the installed code
+    /// emits, which nothing else can clear.
+    Cancel {
+        /// Database file.
+        #[arg(long, default_value = DEFAULT_DB)]
+        db: PathBuf,
+        /// The job to cancel, as printed by `admin explain`.
+        id: String,
+        /// An operator note, recorded against the job's final event.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Cancel even though an agent is holding it.
+        ///
+        /// The server revokes the assignment on that agent's next heartbeat.
+        /// A job mid-commit is refused regardless.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Dispatch an `admin` subcommand.
@@ -222,6 +259,14 @@ pub fn run(cmd: AdminCommand) -> Result<()> {
         } => run_jobs(db, library, limit, dry_run, class),
 
         AdminCommand::Summary { db, library } => summary(db, library),
+        AdminCommand::Jobs { cmd } => match cmd {
+            JobsCommand::Cancel {
+                db,
+                id,
+                reason,
+                force,
+            } => cancel_job(db, id, reason, force),
+        },
     }
 }
 
@@ -455,6 +500,26 @@ fn summary(db: PathBuf, library: Option<String>) -> Result<()> {
         let s = transcodarr_server::summarize(store.pool(), &lib.id)?;
         print!("{}", s.render());
         println!("  ({} ms)\n", started.elapsed().as_millis());
+    }
+    Ok(())
+}
+
+/// Cancel one job.
+///
+/// The refusals carry their own explanation, so this prints the error as-is
+/// rather than restating it — the whole point of `CancelRefused` is that
+/// "Committing" and "Succeeded" need different next moves from the operator.
+fn cancel_job(db: PathBuf, id: String, reason: Option<String>, force: bool) -> Result<()> {
+    let store = open_store(&db)?;
+    let from = store.cancel_job(&id, reason.as_deref(), force)?;
+    println!("cancelled {id} (was {from})");
+    if from.holds_capacity() {
+        // Said plainly because the alternative is an operator watching the
+        // node and concluding the cancel did not take.
+        println!(
+            "  an agent was holding it; the server revokes the assignment on \
+             that agent's next heartbeat"
+        );
     }
     Ok(())
 }

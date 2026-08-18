@@ -1,7 +1,7 @@
 // file: crates/transcodarr-server/src/lib.rs
-// version: 1.10.0
+// version: 1.11.0
 // guid: 8b40e7c2-19d5-46fa-b03e-7c2a815d94f6
-// last-edited: 2026-08-16
+// last-edited: 2026-08-18
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 //! transcodarr orchestration.
@@ -128,5 +128,20 @@ pub enum ServerError {
         percent: f64,
         /// The configured ceiling.
         limit_percent: f64,
+    },
+
+    /// An operator asked to cancel a job that must not be cancelled.
+    ///
+    /// Carries a hint rather than only the state, because `Committing` and
+    /// `Succeeded` send an operator to entirely different next moves and the
+    /// state name alone does not say which.
+    #[error("job {job_id} is {state} and was not cancelled: {hint}")]
+    CancelRefused {
+        /// Which job.
+        job_id: String,
+        /// The state it was in when the refusal was decided.
+        state: String,
+        /// What the operator should do instead.
+        hint: String,
     },
 }
