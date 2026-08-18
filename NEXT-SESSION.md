@@ -1,7 +1,7 @@
 <!-- file: NEXT-SESSION.md -->
-<!-- version: 3.13.1 -->
+<!-- version: 3.14.0 -->
 <!-- guid: c8f01a35-6d47-42b9-a0e5-317b6924cf80 -->
-<!-- last-edited: 2026-08-17 -->
+<!-- last-edited: 2026-08-18 -->
 
 # Goal: a real transcode on the GPU node, both transports, audio and video
 
@@ -12,6 +12,58 @@ original retained in trash, the node's work area swept clean.
 
 What is left of the goal: **video with `hevc_nvenc`**, and **mount mode**, which
 still needs hands on the box.
+
+## Done 2026-08-18: `admin jobs cancel` (PR #91, `623419d`)
+
+```
+transcodarr admin jobs cancel <id> [--reason <text>] [--force]
+```
+
+The escape hatch `REQ-REFRESH` item 4 asked for. Before this, a job that had
+become permanently unsatisfiable could not be cleared at all — `admin` had no
+cancel, reset or requeue, so the only recourse was editing SQLite by hand while
+`explain` went on naming a requirement no installed code can emit. **Items 1–3
+of `REQ-REFRESH` are still open**, so a stale job must still be *cancelled*
+rather than *refreshed*. The job id comes from `admin explain <path>`.
+
+**`Cancelled` was a fully modelled state that nothing ever wrote** — in
+`JobState`, admitted from anywhere non-terminal by `can_transition`, counted by
+`metrics`, stamped with `finished_unix` by `transition_op`. The fifth instance
+of the documented-tested-and-never-called pattern this file already tracks. The
+detection method in that section found it in one grep.
+
+**The reusable finding: three things that looked like they needed handling were
+already covered, and adding any of them would have been a no-op that read as
+load-bearing.** `cancel_job`'s doc comment records each so the next person does
+not "fix" the apparent gap:
+
+- **Capacity.** `orchestrator.rs:12` — *"Rebuild the ledger, do not maintain
+  it."* `tick()` calls `rebuild_capacity` every pass and `rebuild` skips any
+  state where `!occupies_slot`, so the slot frees itself. A CLI-side release
+  would touch that process's in-memory ledger, never the running server's.
+  **This is what makes a separate-process cancel safe at all** — with an
+  incrementally maintained ledger it would have been a distributed-systems
+  problem.
+- **The commit intent.** `sweep_stranded_intents` already resolves live intents
+  whose job is terminal and not `NeedsOperator`. A cancelled job is both.
+- **The agent.** `on_heartbeat` revokes any running job whose state is not in
+  `HELD_STATES`, and `worker.rs` sweeps its work area on every exit path. So
+  `--force` needed **no new protocol message**.
+
+Two guards, both mutation-tested — removing either turns exactly one test red:
+
+- A job an agent holds needs `--force`. The stated need is never in flight.
+- **A `Committing` job is refused even under `--force`.** That is the window
+  between the ritual's two renames — the ambiguity `NeedsOperator` exists to
+  record. Cancelling there races a rename on real files, and the intent sweep
+  would then free a destination whose on-disk state nobody has determined.
+
+**`--force` stops the install, not ffmpeg.** `worker.rs:351` checks the revoke
+*after* the encode finishes, so a forced cancel lets the remaining encode run
+and then discards it. Safe, and not instant. Worth knowing before someone files
+it as a bug.
+
+613 tests, up from 607. Clippy clean.
 
 ## Done 2026-08-12
 
@@ -337,7 +389,7 @@ or byte ranges.
 
 ## The pattern to keep checking for: documented, tested, and never called
 
-Four times in one session, in the same shape — a facility that exists, whose
+Five times now, in the same shape — a facility that exists, whose
 doc comment describes it as the answer to a real question, with **no production
 caller**. Each had passing unit tests. A unit test proves a component works when
 it is called; nothing in one can notice that nothing calls it.
@@ -352,6 +404,10 @@ it is called; nothing in one can notice that nothing calls it.
   the detail. Worse, `tick()` returned before the dispatcher ran when the fleet
   was empty or the schedule was paused, so the two conditions that stop the
   entire queue were the two with no record at all. (PR #88)
+- `JobState::Cancelled` — a terminal state the whole stack already handled and
+  no production code ever wrote. **This one is the proof the method works**:
+  the grep below found it, and because every consumer was already built, the
+  command that closed it was a guard and a `transition_op` call. (PR #91)
 
 **How to find the next one:** grep for a public item, then grep for its callers
 outside its own test module. If the only hits are the definition and its tests,
